@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "channel": "stable",
+  "repository": "VinsonKon/token-meter-releases",
+  "generated_at": "2026-07-16T14:13:36.088370+00:00",
+  "client": {
+    "version": "1.0.0",
+    "asset": "CodexMeterSync.exe",
+    "sha256": "716bccbcd164ef56c144e252ca93b11b3c887bb696bc73c8493fe53791505ea9"
+  },
+  "firmware": {
+    "version": "1.0.0",
+    "board": "waveshare-amoled-2.16",
+    "min_client": "1.0.0",
+    "min_battery": 30,
+    "asset": "codex-token-monitor.ota.bin",
+    "sha256": "4f497571f53787fbb7b91bf594110e5151377a0d8fbd4829c9f29d0417f8202f"
+  }
+}
