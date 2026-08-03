@@ -1,0 +1,40 @@
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+
+# PlatformIO build state
+.pio/
+
+# PyInstaller and launcher build state
+desktop/build*/
+desktop/dist*/
+*.spec
+
+# Release and firmware artifacts
+/github-release/
+/release-package/
+/*.exe
+/*.bin
+/*.zip
+/*.bak
+/.release-build-*.log
+
+# Local account, pairing, and runtime state
+.codex-account.json
+.device-address
+.device-name
+.exchange-rates.json
+.reset-credits.json
+.source-selection.json
+.model-selection.json
+.pending-firmware-update.json
+updates/
+*.log
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
