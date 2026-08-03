@@ -1,0 +1,4 @@
+bleak>=0.22,<2
+watchfiles>=0.21,<2
+pystray>=0.19,<1
+Pillow>=10,<13
