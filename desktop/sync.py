@@ -905,8 +905,115 @@ def _codex_call_requires_approval(payload: dict[str, Any]) -> bool:
         except (json.JSONDecodeError, TypeError):
             return False
     if not isinstance(arguments, dict):
-        return False
+        return _codex_exec_input_requires_approval(payload)
     return arguments.get("sandbox_permissions") == "require_escalated"
+
+
+def _codex_exec_input_requires_approval(payload: dict[str, Any]) -> bool:
+    """Read the scoped shell-command options from a modern exec call."""
+    if payload.get("type") != "custom_tool_call":
+        return False
+    if payload.get("name") != "exec":
+        return False
+    source = payload.get("input")
+    if not isinstance(source, str):
+        return False
+
+    tokens = _javascript_tokens(source)
+    index = 0
+    while index + 3 < len(tokens):
+        if tokens[index:index + 4] != [
+            ("name", "tools"),
+            ("punct", "."),
+            ("name", "shell_command"),
+            ("punct", "("),
+        ]:
+            index += 1
+            continue
+        if _javascript_call_has_escalated_permission(tokens, index + 4):
+            return True
+        index += 4
+    return False
+
+
+def _javascript_call_has_escalated_permission(
+    tokens: list[tuple[str, str]],
+    index: int,
+) -> bool:
+    """Inspect only top-level properties of a shell_command argument object."""
+    if index >= len(tokens) or tokens[index] != ("punct", "{"):
+        return False
+    depth = 1
+    index += 1
+    while index < len(tokens) and depth:
+        token = tokens[index]
+        if token == ("punct", "{"):
+            depth += 1
+        elif token == ("punct", "}"):
+            depth -= 1
+        elif (
+            depth == 1
+            and token in (
+                ("name", "sandbox_permissions"),
+                ("string", "sandbox_permissions"),
+            )
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == ("punct", ":")
+            and tokens[index + 2] == ("string", "require_escalated")
+        ):
+            return True
+        index += 1
+    return False
+
+
+def _javascript_tokens(source: str) -> list[tuple[str, str]]:
+    """Tokenize enough JavaScript to inspect an object without executing it."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char.isspace():
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = length if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            closing = source.find("*/", index + 2)
+            index = length if closing < 0 else closing + 2
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            index += 1
+            value: list[str] = []
+            while index < length:
+                char = source[index]
+                if char == "\\" and index + 1 < length:
+                    value.append(source[index + 1])
+                    index += 2
+                    continue
+                if char == quote:
+                    index += 1
+                    break
+                value.append(char)
+                index += 1
+            tokens.append(("string", "".join(value)))
+            continue
+        if char.isalpha() or char in ("_", "$"):
+            end = index + 1
+            while end < length and (
+                source[end].isalnum() or source[end] in ("_", "$")
+            ):
+                end += 1
+            tokens.append(("name", source[index:end]))
+            index = end
+            continue
+        if char in ".(){}[]:,":
+            tokens.append(("punct", char))
+        index += 1
+    return tokens
 
 
 def _codex_is_image_tool(payload: dict[str, Any]) -> bool:

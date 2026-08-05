@@ -209,6 +209,74 @@ class CodexApprovalStateTests(unittest.TestCase):
         self.assertTrue(active)
         self.assertFalse(needs_approval)
 
+    def test_modern_exec_call_enters_and_output_leaves_approval(self) -> None:
+        call = _response({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call-modern",
+            "status": "completed",
+            "input": """const result = await tools.shell_command({
+                command: "example",
+                sandbox_permissions: "require_escalated",
+                justification: "Allow this action?",
+            });
+            text(result);""",
+        })
+
+        active, needs_approval, _ = sync._codex_session_runtime_state([
+            _event({"type": "task_started"}),
+            call,
+        ])
+        self.assertTrue(active)
+        self.assertTrue(needs_approval)
+
+        active, needs_approval, _ = sync._codex_session_runtime_state([
+            _event({"type": "task_started"}),
+            call,
+            _response({
+                "type": "custom_tool_call_output",
+                "call_id": "call-modern",
+                "output": "done",
+            }),
+        ])
+        self.assertTrue(active)
+        self.assertFalse(needs_approval)
+
+    def test_modern_exec_approval_detection_is_scoped_to_shell_options(
+        self,
+    ) -> None:
+        inputs = (
+            """const result = await tools.shell_command({
+                command: 'echo sandbox_permissions: "require_escalated"',
+            }); text(result);""",
+            """const value = {
+                sandbox_permissions: "require_escalated",
+            }; text(value);""",
+            """const result = await tools.shell_command({
+                command: "example",
+                metadata: {
+                    sandbox_permissions: "require_escalated",
+                },
+            }); text(result);""",
+        )
+
+        for index, source in enumerate(inputs):
+            with self.subTest(index=index):
+                active, needs_approval, _ = (
+                    sync._codex_session_runtime_state([
+                        _event({"type": "task_started"}),
+                        _response({
+                            "type": "custom_tool_call",
+                            "name": "exec",
+                            "call_id": f"call-{index}",
+                            "status": "completed",
+                            "input": source,
+                        }),
+                    ])
+                )
+                self.assertTrue(active)
+                self.assertFalse(needs_approval)
+
     def test_approval_takes_priority_over_thinking_activity(self) -> None:
         snapshot = {
             "task_active": True,
