@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import json
 import queue
@@ -289,6 +290,34 @@ class ReconnectRecoveryTests(unittest.TestCase):
         service._queue_device_update_state.assert_not_called()
         service._set_status.assert_not_called()
         service._update_device_menu.assert_called_once_with()
+
+
+class DailyLogRetentionTests(unittest.TestCase):
+    def test_daily_logs_roll_over_and_keep_only_today_and_yesterday(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            day_one = datetime(2026, 8, 3, 9, 0, 0)
+            day_two = datetime(2026, 8, 4, 9, 0, 0)
+            day_three = datetime(2026, 8, 5, 9, 0, 0)
+
+            (state_dir / "sync.log").write_text("legacy", encoding="utf-8")
+            (state_dir / "tray-startup.log").write_text(
+                "legacy", encoding="utf-8"
+            )
+            tray_app.append_sync_log(state_dir, "day one", day_one)
+            tray_app.append_sync_log(state_dir, "day two", day_two)
+            current = tray_app.append_sync_log(
+                state_dir, "day three", day_three
+            )
+
+            self.assertEqual("sync-2026-08-05.log", current.name)
+            self.assertEqual(
+                {"sync-2026-08-04.log", "sync-2026-08-05.log"},
+                {path.name for path in state_dir.glob("*.log")},
+            )
+            self.assertEqual(
+                "day three\n", current.read_text(encoding="utf-8")
+            )
 
 
 if __name__ == "__main__":

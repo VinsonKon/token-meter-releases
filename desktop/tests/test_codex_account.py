@@ -449,8 +449,9 @@ class DevicePacketSelectionTests(unittest.TestCase):
 
         self.assertEqual(5.0, sync.estimate_cost_usd(snapshot))
 
-    def test_empty_local_cost_data_does_not_price_lifetime_total(self) -> None:
+    def test_empty_local_daily_cost_is_explicit_zero(self) -> None:
         snapshot = self.snapshot()
+        snapshot["token_scope"] = "local_daily"
         snapshot["cost_tokens"] = {
             "input_tokens": 0,
             "cached_input_tokens": 0,
@@ -459,7 +460,13 @@ class DevicePacketSelectionTests(unittest.TestCase):
             "total_tokens": 0,
         }
 
-        self.assertIsNone(sync.estimate_cost_usd(snapshot))
+        self.assertEqual(0.0, sync.estimate_cost_usd(snapshot))
+        cost_cny, source = sync.cost_cny_for_snapshot(snapshot, None, 6.8)
+        self.assertEqual((0.0, "api-equivalent"), (cost_cny, source))
+        self.assertEqual(
+            0,
+            json.loads(sync.build_packet(snapshot, cost_cny=cost_cny))["c"],
+        )
 
     def test_cost_prices_models_separately_and_skips_unknown(self) -> None:
         snapshot = self.snapshot()
@@ -490,7 +497,7 @@ class DevicePacketSelectionTests(unittest.TestCase):
 
         self.assertEqual(7.5, sync.estimate_cost_usd(snapshot))
 
-    def test_unknown_only_usage_is_zero_not_unavailable(self) -> None:
+    def test_unknown_only_usage_is_unavailable_not_misleading_zero(self) -> None:
         snapshot = self.snapshot()
         snapshot["cost_tokens_by_model"] = {
             "future-model": {
@@ -502,12 +509,12 @@ class DevicePacketSelectionTests(unittest.TestCase):
             },
         }
 
-        self.assertEqual(0.0, sync.estimate_cost_usd(snapshot))
+        self.assertIsNone(sync.estimate_cost_usd(snapshot))
         cost_cny, source = sync.cost_cny_for_snapshot(snapshot, None, 6.8)
         message = json.loads(sync.build_packet(snapshot, cost_cny=cost_cny))
-        self.assertEqual(0.0, cost_cny)
-        self.assertEqual("api-equivalent", source)
-        self.assertEqual(0, message["c"])
+        self.assertIsNone(cost_cny)
+        self.assertEqual("unavailable", source)
+        self.assertEqual(-1, message["c"])
 
 
 if __name__ == "__main__":

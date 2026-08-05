@@ -1,6 +1,6 @@
 # Codex Token Monitor for Waveshare AMOLED 2.16
 
-## Version 1.0.6
+## Version 1.0.7
 
 ### Figma update states and single-quota layout
 
@@ -52,7 +52,7 @@
 - `AI Tool`：选择 `Auto`、`Codex` 或 `Claude Code` 数据源；
 - `Updates`：检查并安装正式版客户端更新或设备固件 OTA；
 - `Start with Windows`：开启或关闭当前用户的开机自动运行，无需管理员权限；
-- `Open log`：打开 `%APPDATA%\CodexMeter\sync.log`；
+- `Open log`：打开当天的 `%APPDATA%\CodexMeter\sync-YYYY-MM-DD.log`；同步器每天新建文件，并只保留今天和前一天两个日志；
 - `Exit`：断开 BLE 并退出。
 
 开发时使用独立的 `CodexMeterSync-Test.exe`。它不会注册开机启动，并增加
@@ -241,7 +241,7 @@ python sync.py --address "已知的蓝牙地址"
 只有直连入口发生网络或 HTTP 故障时才使用 `api.github.com` 作为兼容备用。备用 API
 遇到限流时会遵守冷却时间，并把限流余量、重试时间和 GitHub 请求编号写入错误信息。
 
-首次安装必须用 USB 烧录 `1.0.6` 的 `codex-token-monitor.factory.bin`，建立双 OTA 分区。
+首次安装必须用 USB 烧录 `1.0.7` 的 `codex-token-monitor.factory.bin`，建立双 OTA 分区。
 之后：
 
 - 客户端更新只下载 `CodexMeterSync.exe`。主 EXE 内置隐藏更新模式：它会先把自身复制
@@ -259,7 +259,7 @@ powershell -ExecutionPolicy Bypass -File .\build-release.ps1
 
 在 GitHub 打开
 [`/releases/new`](https://github.com/VinsonKon/token-meter-releases/releases/new)，
-创建标签（当前版本为 `v1.0.6`），将 `github-release` 内以下固定文件全部上传并发布：
+创建标签（当前版本为 `v1.0.7`），将 `github-release` 内以下固定文件全部上传并发布：
 
 - `CodexMeterSync.exe`
 - `codex-token-monitor.ota.bin`
@@ -280,7 +280,7 @@ CNY = USD × USD/CNY
 
 `output_tokens` 已包含 reasoning token，因此不会把 `reasoning_output_tokens` 再计费一次。模型单价参照 [OpenAI Codex rate card](https://help.openai.com/en/articles/20001106-codex-rate-card) 和 [GPT-5.6 Sol API pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol)。这个数值是标准 API 等价成本估算，不是 Pro 订阅实际扣款；套餐内用量优先使用，超过额度后才可能消耗购买的 credits。
 
-汇率规则参考 token-monitor v0.24.0：`--usd-cny` 手动值 > 24 小时在线/本地缓存 > 内置离线兜底 `6.8`。在线汇率失败不会影响 BLE 同步。`--no-live-fx` 禁用在线查询，`--cost-cny` 仍可直接覆盖最终显示金额。屏幕以 `RMB` 标识金额；每个已知模型按自己的价格计入总额，未知模型只跳过该项。没有新的可计价 Token 数据时，设备继续显示上一次有效值。
+汇率规则参考 token-monitor v0.24.0：`--usd-cny` 手动值 > 24 小时在线/本地缓存 > 内置离线兜底 `6.8`。在线汇率失败不会影响 BLE 同步。`--no-live-fx` 禁用在线查询，`--cost-cny` 仍可直接覆盖最终显示金额。屏幕以 `RMB` 标识金额；每个已知模型按自己的价格计入总额，未知模型只跳过该项。当天没有 Token 数据时 Token 和费用显示 `0`；有用量但模型无法计价时费用显示 `--`，不会沿用上一来源或前一天的费用。
 
 ## Figma UI 状态
 

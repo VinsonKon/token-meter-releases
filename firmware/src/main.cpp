@@ -1033,10 +1033,6 @@ void loop() {
       incoming.total_tokens = snapshot.total_tokens;
       incoming.flags |= codex_meter::kTokenTotalsValid;
     }
-    if (incoming.cost_cny_cents < 0 && hasSnapshot &&
-        snapshot.cost_cny_cents >= 0) {
-      incoming.cost_cny_cents = snapshot.cost_cny_cents;
-    }
     const bool dataChanged = !hasSnapshot || packetDataChanged(snapshot, incoming);
     snapshot = incoming;
     hasSnapshot = true;

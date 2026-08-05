@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -75,6 +75,8 @@ import update_manager
 APP_NAME = "CodexMeterSync"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MUTEX_NAME = "Local\\CodexMeterSync.Tray"
+SYNC_LOG_PREFIX = "sync-"
+SYNC_LOG_SUFFIX = ".log"
 FIRMWARE_PHASE_IDLE = "idle"
 FIRMWARE_PHASE_CONFIRMING = "confirming"
 FIRMWARE_PHASE_DOWNLOADING = "downloading"
@@ -90,13 +92,44 @@ FIRMWARE_TRANSFER_ACTIVE_PHASES = frozenset({
 _mutex_handle = None
 
 
+def sync_log_path(state_dir: Path, now: datetime | None = None) -> Path:
+    current = now or datetime.now().astimezone()
+    return state_dir / f"{SYNC_LOG_PREFIX}{current:%Y-%m-%d}{SYNC_LOG_SUFFIX}"
+
+
+def prune_sync_logs(state_dir: Path, now: datetime | None = None) -> None:
+    current = now or datetime.now().astimezone()
+    keep = {
+        sync_log_path(state_dir, current).name,
+        sync_log_path(state_dir, current - timedelta(days=1)).name,
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    for path in state_dir.glob("*.log"):
+        if path.name not in keep:
+            path.unlink(missing_ok=True)
+
+
+def append_sync_log(
+    state_dir: Path, message: str, now: datetime | None = None
+) -> Path:
+    current = now or datetime.now().astimezone()
+    prune_sync_logs(state_dir, current)
+    path = sync_log_path(state_dir, current)
+    with path.open("a", encoding="utf-8") as log:
+        log.write(message.rstrip("\n") + "\n")
+    return path
+
+
 def write_boot_diagnostic(message: str) -> None:
     if not getattr(sys, "frozen", False):
         return
     try:
-        path = meter_sync.state_directory() / "tray-startup.log"
-        with path.open("a", encoding="utf-8") as log:
-            log.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
+        now = datetime.now().astimezone()
+        append_sync_log(
+            meter_sync.state_directory(),
+            f"[{now:%Y-%m-%d %H:%M:%S}] {message}",
+            now,
+        )
     except OSError:
         pass
 
@@ -272,7 +305,11 @@ class TrayService:
         self.firmware_update_in_progress = False
         self.firmware_update_phase = FIRMWARE_PHASE_IDLE
         self.state_dir = meter_sync.state_directory()
-        self.log_path = self.state_dir / "sync.log"
+        self.log_path = sync_log_path(self.state_dir)
+        try:
+            prune_sync_logs(self.state_dir)
+        except OSError:
+            pass
         self.source_path = self.state_dir / ".source-selection.json"
         self.legacy_model_path = self.state_dir / ".model-selection.json"
         self.device_address_path = self.state_dir / ".device-address"
@@ -1057,14 +1094,13 @@ class TrayService:
         # Logging is diagnostic only. A locked file or a temporarily unavailable
         # profile directory must never stop BLE synchronization.
         try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as log:
-                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                line = (
-                    message if message.startswith("[")
-                    else f"[{stamp}] {message}"
-                )
-                log.write(f"{line}\n")
+            now = datetime.now().astimezone()
+            stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            line = (
+                message if message.startswith("[")
+                else f"[{stamp}] {message}"
+            )
+            self.log_path = append_sync_log(self.state_dir, line, now)
         except OSError:
             pass
         try:
@@ -1170,6 +1206,9 @@ class TrayService:
             self._set_status(f"Autostart error: {exc}")
 
     def _open_log(self, _icon, _item) -> None:
+        now = datetime.now().astimezone()
+        prune_sync_logs(self.state_dir, now)
+        self.log_path = sync_log_path(self.state_dir, now)
         self.log_path.touch(exist_ok=True)
         os.startfile(self.log_path)
 
@@ -1210,8 +1249,13 @@ def main(test_build: bool = False) -> int:
         return 0
     except Exception:
         try:
-            crash_path = meter_sync.state_directory() / "tray-crash.log"
-            crash_path.write_text(traceback.format_exc(), encoding="utf-8")
+            now = datetime.now().astimezone()
+            append_sync_log(
+                meter_sync.state_directory(),
+                f"[{now:%Y-%m-%d %H:%M:%S}] Unhandled exception\n"
+                f"{traceback.format_exc()}",
+                now,
+            )
         except OSError:
             pass
         return 1

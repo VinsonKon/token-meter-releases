@@ -216,8 +216,10 @@ class CodexApprovalStateTests(unittest.TestCase):
             "activity": "idle",
         }
 
+        packet = json.loads(sync.build_packet(snapshot))
         sync._refresh_activity(snapshot)
 
+        self.assertEqual("need approval", packet["s"])
         self.assertEqual("need approval", snapshot["activity"])
 
     def test_approval_is_aggregated_across_concurrent_sessions(self) -> None:
@@ -329,6 +331,33 @@ class CodexSessionFilteringAndTokenTests(unittest.TestCase):
         self.assertFalse(cache.states[guardian.resolve()].trackable)
         self.assertNotIn(guardian.resolve(), cache.candidates)
 
+    def test_cold_start_finds_today_modified_user_session_in_old_folder(
+        self,
+    ) -> None:
+        internal = self.sessions / "internal.jsonl"
+        internal.write_text(
+            _session_meta(thread_source="subagent")
+            + _turn_context("gpt-5.6-sol")
+            + _token_count(10_000),
+            encoding="utf-8",
+        )
+        old_folder = self.home / "sessions" / "2000" / "01" / "01"
+        old_folder.mkdir(parents=True)
+        user = old_folder / "resumed-user.jsonl"
+        user.write_text(
+            _session_meta()
+            + _turn_context("gpt-5.6-sol")
+            + _token_count(321),
+            encoding="utf-8",
+        )
+
+        snapshot = sync._read_codex_usage(self.home)
+        cache = sync._codex_cache(self.home)
+
+        self.assertEqual(321, snapshot["tokens"]["total_tokens"])
+        self.assertIn(user.resolve(), cache.candidates)
+        self.assertFalse(cache.states[internal.resolve()].trackable)
+
     def test_internal_sessions_do_not_consume_runtime_scan_limit(self) -> None:
         user = self.sessions / "00-user.jsonl"
         user.write_text(
@@ -392,6 +421,28 @@ class CodexSessionFilteringAndTokenTests(unittest.TestCase):
         snapshot = sync._read_codex_usage(self.home)
 
         self.assertEqual(180, snapshot["tokens"]["total_tokens"])
+
+    def test_truncated_session_rebuilds_global_event_fingerprints(self) -> None:
+        session = self.sessions / "truncated.jsonl"
+        prefix = _session_meta() + _turn_context("gpt-5.6-sol")
+        first = _token_count(100)
+        session.write_text(
+            prefix + first + _token_count(200),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            200,
+            sync._read_codex_usage(self.home)["tokens"]["total_tokens"],
+        )
+
+        session.write_text(prefix + first, encoding="utf-8")
+        rebuilt = sync._read_codex_usage(self.home)
+        self.assertEqual(100, rebuilt["tokens"]["total_tokens"])
+
+        with session.open("a", encoding="utf-8") as stream:
+            stream.write(_token_count(250))
+        continued = sync._read_codex_usage(self.home)
+        self.assertEqual(250, continued["tokens"]["total_tokens"])
 
     def test_exact_events_copied_across_files_are_counted_once(self) -> None:
         original = self.sessions / "original.jsonl"

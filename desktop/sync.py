@@ -48,6 +48,7 @@ FX_SOURCES = (
 CODEX_TASK_ORPHAN_TIMEOUT_SECONDS = 30.0 * 60.0
 CODEX_TASK_SESSION_SCAN_LIMIT = 16
 CODEX_SESSION_DISCOVERY_INTERVAL_SECONDS = 2.0
+CODEX_DAILY_SESSION_SCAN_INTERVAL_SECONDS = 30.0
 CODEX_COLD_SCAN_LIMIT = 32
 TOKEN_KEYS = (
     "input_tokens",
@@ -223,6 +224,7 @@ def estimate_cost_usd(snapshot: dict[str, Any]) -> float | None:
     if isinstance(by_model, dict):
         total_cost = 0.0
         saw_usage = False
+        saw_priced_usage = False
         for model, raw_totals in by_model.items():
             if not isinstance(raw_totals, dict):
                 continue
@@ -237,6 +239,7 @@ def estimate_cost_usd(snapshot: dict[str, Any]) -> float | None:
                 # Unknown/internal future model ids are omitted from the RMB
                 # estimate without invalidating the known-model subtotal.
                 continue
+            saw_priced_usage = True
             cached_tokens = min(
                 input_tokens,
                 _bounded_u64(raw_totals.get("cached_input_tokens")),
@@ -248,7 +251,11 @@ def estimate_cost_usd(snapshot: dict[str, Any]) -> float | None:
                 + cached_tokens * cached_rate
                 + output_tokens * output_rate
             ) / 1_000_000
-        return total_cost if saw_usage else None
+        if saw_priced_usage:
+            return total_cost
+        if saw_usage:
+            return None
+        return 0.0 if snapshot.get("token_scope") == "local_daily" else None
 
     pricing = model_registry.pricing_for_model(snapshot.get("model"))
     totals = (
@@ -256,13 +263,15 @@ def estimate_cost_usd(snapshot: dict[str, Any]) -> float | None:
         if "cost_tokens" in snapshot
         else snapshot.get("tokens") or {}
     )
-    if pricing is None or not totals:
+    if not totals:
         return None
     input_tokens = _bounded_u64(totals.get("input_tokens"))
     cached_tokens = min(input_tokens, _bounded_u64(totals.get("cached_input_tokens")))
     uncached_tokens = input_tokens - cached_tokens
     output_tokens = _bounded_u64(totals.get("output_tokens"))
     if input_tokens == 0 and output_tokens == 0:
+        return 0.0 if snapshot.get("token_scope") == "local_daily" else None
+    if pricing is None:
         return None
     input_rate, cached_rate, output_rate = pricing
     return (
@@ -398,6 +407,7 @@ class _CodexHomeCache:
     dirty_paths: set[Path] = field(default_factory=set)
     last_discovery: float = 0.0
     cold_scan_complete: bool = False
+    last_daily_scan: float = 0.0
     seen_token_events: set[bytes] = field(default_factory=set)
 
 
@@ -437,13 +447,14 @@ def _session_day_directories(sessions: Path) -> tuple[Path, Path]:
 def _discover_codex_candidates(
     cache: _CodexHomeCache, *, force: bool = False
 ) -> list[Path]:
-    """Discover current logs without recursively walking session history.
+    """Discover current logs while keeping the frequent scan inexpensive.
 
     Codex stores normal sessions under sessions/YYYY/MM/DD. The hot path only
     lists today, yesterday (for a task crossing midnight), and root-level
-    JSONL files used by older clients. A recursive walk is allowed once as a
-    cold-start fallback when those locations are empty. archived_sessions is
-    deliberately never consulted.
+    JSONL files used by older clients. A metadata-only recursive scan runs at
+    startup and periodically so a resumed session in an older creation-date
+    directory cannot be hidden by unrelated files in the hot directories.
+    archived_sessions is deliberately never consulted.
     """
     now = time.monotonic()
     if (
@@ -487,11 +498,28 @@ def _discover_codex_candidates(
         ):
             found.add(path)
 
-    if not found and not cache.cold_scan_complete:
+    if (
+        not cache.cold_scan_complete
+        or now - cache.last_daily_scan
+        >= CODEX_DAILY_SESSION_SCAN_INTERVAL_SECONDS
+    ):
+        if sessions.exists():
+            try:
+                for path in sessions.rglob("*.jsonl"):
+                    try:
+                        if path.stat().st_mtime >= cache.day_start:
+                            found.add(path)
+                    except OSError:
+                        continue
+            except OSError:
+                pass
+        cache.cold_scan_complete = True
+        cache.last_daily_scan = now
+
+    if not found and not cache.states:
         found.update(
             _recent_jsonl_files((sessions,), CODEX_COLD_SCAN_LIMIT)
         )
-        cache.cold_scan_complete = True
 
     metadata: list[tuple[int, Path]] = []
     for path in found:
@@ -770,6 +798,29 @@ def _refresh_codex_cache(codex_home: Path) -> _CodexHomeCache:
         candidates = _discover_codex_candidates(
             cache, force=bool(cache.dirty_paths)
         )
+        truncated = False
+        for path in candidates:
+            state = cache.states.get(path)
+            if state is None:
+                continue
+            try:
+                truncated = path.stat().st_size < state.offset
+            except OSError:
+                continue
+            if truncated:
+                break
+        if truncated:
+            # Event fingerprints are global to the home cache. Rebuilding all
+            # session state together prevents a truncated/replaced JSONL file
+            # from having its valid replay suppressed by stale fingerprints.
+            cache.states.clear()
+            cache.candidates.clear()
+            cache.dirty_paths.clear()
+            cache.seen_token_events.clear()
+            cache.last_discovery = 0.0
+            cache.cold_scan_complete = False
+            cache.last_daily_scan = 0.0
+            candidates = _discover_codex_candidates(cache, force=True)
         for path in candidates:
             _update_codex_session(cache, path)
         cache.candidates = [
@@ -1414,7 +1465,10 @@ def build_packet(
     reached = _rate_limit_reached(limits)
     # Keep task lifecycle and quota state as separate signals. A task banner
     # (including NEED APPROVAL) can coexist with a low-quota card.
-    status = snapshot.get("activity", "idle")
+    status = (
+        "need approval" if snapshot.get("needs_approval")
+        else snapshot.get("activity", "idle")
+    )
 
     def window(value: dict[str, Any]) -> list[int] | None:
         if not value:
@@ -1684,7 +1738,8 @@ def _sync_summary(snapshot: dict[str, Any], packet: bytes, address: str,
         return f"{window.get('used_percent', '--')}%"
 
     status = (
-        "limited" if _rate_limit_reached(snapshot["rate_limits"])
+        "need approval" if snapshot.get("needs_approval")
+        else "limited" if _rate_limit_reached(snapshot["rate_limits"])
         else snapshot.get("activity", "idle")
     )
     reset_available = bool(
