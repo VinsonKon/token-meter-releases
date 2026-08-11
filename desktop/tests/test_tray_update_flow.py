@@ -72,10 +72,10 @@ class TrayIconAssetTests(unittest.TestCase):
         assert bbox is not None
         width_ratio = (bbox[2] - bbox[0]) / image.width
         height_ratio = (bbox[3] - bbox[1]) / image.height
-        self.assertGreaterEqual(width_ratio, 0.80)
-        self.assertLessEqual(width_ratio, 0.86)
-        self.assertGreaterEqual(height_ratio, 0.80)
-        self.assertLessEqual(height_ratio, 0.86)
+        self.assertGreaterEqual(width_ratio, 0.95)
+        self.assertLessEqual(width_ratio, 1.00)
+        self.assertGreaterEqual(height_ratio, 0.94)
+        self.assertLessEqual(height_ratio, 1.00)
         for point in ((0, 0), (63, 0), (0, 63), (63, 63)):
             self.assertEqual(0, alpha.getpixel(point))
 
