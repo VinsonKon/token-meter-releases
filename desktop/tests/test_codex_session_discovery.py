@@ -215,8 +215,8 @@ class CodexApprovalStateTests(unittest.TestCase):
             "name": "exec",
             "call_id": "call-modern",
             "status": "completed",
-            "input": """const result = await tools.shell_command({
-                command: "example",
+            "input": """const result = await tools.exec_command({
+                cmd: "example",
                 sandbox_permissions: "require_escalated",
                 justification: "Allow this action?",
             });
@@ -242,12 +242,27 @@ class CodexApprovalStateTests(unittest.TestCase):
         self.assertTrue(active)
         self.assertFalse(needs_approval)
 
+    def test_modern_shell_command_remains_supported(self) -> None:
+        self.assertTrue(
+            sync._codex_exec_input_requires_approval({
+                "type": "custom_tool_call",
+                "name": "exec",
+                "input": """const result = await tools.shell_command({
+                    command: "example",
+                    sandbox_permissions: "require_escalated",
+                });
+                text(result);""",
+            })
+        )
+
+
+
     def test_modern_exec_approval_detection_is_scoped_to_shell_options(
         self,
     ) -> None:
         inputs = (
-            """const result = await tools.shell_command({
-                command: 'echo sandbox_permissions: "require_escalated"',
+            """const result = await tools.exec_command({
+                cmd: 'echo sandbox_permissions: "require_escalated"',
             }); text(result);""",
             """const value = {
                 sandbox_permissions: "require_escalated",

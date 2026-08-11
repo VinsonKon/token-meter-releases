@@ -105,6 +105,10 @@ New-Item -ItemType Directory -Path $desktopPackage | Out-Null
 Get-ChildItem -LiteralPath $desktop -File | Where-Object {
     $_.Extension -in ".py", ".cs", ".cmd", ".ps1", ".txt"
 } | Copy-Item -Destination $desktopPackage -Force
+$desktopAssets = Join-Path $desktop "assets"
+if (Test-Path -LiteralPath $desktopAssets -PathType Container) {
+    Copy-Item -LiteralPath $desktopAssets -Destination $desktopPackage -Recurse
+}
 
 $firmwarePackage = Join-Path $packageRootFull "firmware"
 New-Item -ItemType Directory -Path $firmwarePackage | Out-Null

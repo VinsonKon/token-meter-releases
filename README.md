@@ -1,6 +1,6 @@
 # Codex Token Monitor for Waveshare AMOLED 2.16
 
-## Version 1.0.8
+## Version 1.0.9
 
 ### Figma update states and single-quota layout
 
@@ -241,7 +241,7 @@ python sync.py --address "已知的蓝牙地址"
 只有直连入口发生网络或 HTTP 故障时才使用 `api.github.com` 作为兼容备用。备用 API
 遇到限流时会遵守冷却时间，并把限流余量、重试时间和 GitHub 请求编号写入错误信息。
 
-首次安装必须用 USB 烧录 `1.0.8` 的 `codex-token-monitor.factory.bin`，建立双 OTA 分区。
+首次安装必须用 USB 烧录 `1.0.9` 的 `codex-token-monitor.factory.bin`，建立双 OTA 分区。
 之后：
 
 - 客户端更新只下载 `CodexMeterSync.exe`。主 EXE 内置隐藏更新模式：它会先把自身复制
@@ -259,7 +259,7 @@ powershell -ExecutionPolicy Bypass -File .\build-release.ps1
 
 在 GitHub 打开
 [`/releases/new`](https://github.com/VinsonKon/token-meter-releases/releases/new)，
-创建标签（当前版本为 `v1.0.8`），将 `github-release` 内以下固定文件全部上传并发布：
+创建标签（当前版本为 `v1.0.9`），将 `github-release` 内以下固定文件全部上传并发布：
 
 - `CodexMeterSync.exe`
 - `codex-token-monitor.ota.bin`

@@ -57,6 +57,29 @@ def service_for_confirmation():
     return service
 
 
+class TrayIconAssetTests(unittest.TestCase):
+    def test_icon_is_transparent_and_keeps_source_scale(self) -> None:
+        image = tray_app.create_icon_image()
+
+        self.assertEqual((64, 64), image.size)
+        self.assertEqual("RGBA", image.mode)
+        alpha = image.getchannel("A")
+        visible_alpha = alpha.point(
+            lambda value: 255 if value >= 8 else 0
+        )
+        bbox = visible_alpha.getbbox()
+        self.assertIsNotNone(bbox)
+        assert bbox is not None
+        width_ratio = (bbox[2] - bbox[0]) / image.width
+        height_ratio = (bbox[3] - bbox[1]) / image.height
+        self.assertGreaterEqual(width_ratio, 0.64)
+        self.assertLessEqual(width_ratio, 0.74)
+        self.assertGreaterEqual(height_ratio, 0.63)
+        self.assertLessEqual(height_ratio, 0.73)
+        for point in ((0, 0), (63, 0), (0, 63), (63, 63)):
+            self.assertEqual(0, alpha.getpixel(point))
+
+
 class FirmwareConfirmationTests(unittest.TestCase):
     def test_menu_callback_schedules_confirmation_and_returns(self) -> None:
         service = service_for_confirmation()

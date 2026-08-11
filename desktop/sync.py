@@ -910,7 +910,7 @@ def _codex_call_requires_approval(payload: dict[str, Any]) -> bool:
 
 
 def _codex_exec_input_requires_approval(payload: dict[str, Any]) -> bool:
-    """Read the scoped shell-command options from a modern exec call."""
+    """Read scoped command options from a modern exec call."""
     if payload.get("type") != "custom_tool_call":
         return False
     if payload.get("name") != "exec":
@@ -922,12 +922,17 @@ def _codex_exec_input_requires_approval(payload: dict[str, Any]) -> bool:
     tokens = _javascript_tokens(source)
     index = 0
     while index + 3 < len(tokens):
-        if tokens[index:index + 4] != [
-            ("name", "tools"),
-            ("punct", "."),
-            ("name", "shell_command"),
-            ("punct", "("),
-        ]:
+        if (
+            tokens[index:index + 2] != [
+                ("name", "tools"),
+                ("punct", "."),
+            ]
+            or tokens[index + 2] not in (
+                ("name", "shell_command"),
+                ("name", "exec_command"),
+            )
+            or tokens[index + 3] != ("punct", "(")
+        ):
             index += 1
             continue
         if _javascript_call_has_escalated_permission(tokens, index + 4):
@@ -940,7 +945,7 @@ def _javascript_call_has_escalated_permission(
     tokens: list[tuple[str, str]],
     index: int,
 ) -> bool:
-    """Inspect only top-level properties of a shell_command argument object."""
+    """Inspect only top-level properties of a command argument object."""
     if index >= len(tokens) or tokens[index] != ("punct", "{"):
         return False
     depth = 1

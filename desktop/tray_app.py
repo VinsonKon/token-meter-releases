@@ -63,7 +63,7 @@ def enable_high_dpi_awareness() -> None:
 # DPI awareness must be selected before importing or creating any UI backend.
 enable_high_dpi_awareness()
 
-from PIL import Image, ImageDraw
+from PIL import Image
 import pystray
 
 import source_registry
@@ -73,6 +73,7 @@ import update_manager
 
 
 APP_NAME = "CodexMeterSync"
+ICON_ASSET_NAME = "codex-meter-icon.png"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MUTEX_NAME = "Local\\CodexMeterSync.Tray"
 SYNC_LOG_PREFIX = "sync-"
@@ -269,13 +270,18 @@ class suppress_os_error:
         return exc_type is not None and issubclass(exc_type, OSError)
 
 
+def icon_asset_path() -> Path:
+    bundle_root = Path(
+        getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+    )
+    return bundle_root / "assets" / ICON_ASSET_NAME
+
+
 def create_icon_image() -> Image.Image:
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((4, 4, 60, 60), radius=15, fill=(69, 74, 236, 255))
-    draw.ellipse((18, 18, 46, 46), outline=(255, 255, 255, 255), width=6)
-    draw.arc((25, 25, 55, 55), 120, 260, fill=(162, 165, 245, 255), width=5)
-    return image
+    with Image.open(icon_asset_path()) as source:
+        return source.convert("RGBA").resize(
+            (64, 64), Image.Resampling.LANCZOS
+        )
 
 
 class TrayService:
