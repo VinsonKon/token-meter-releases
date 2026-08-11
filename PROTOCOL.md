@@ -17,7 +17,7 @@ The device exposes one custom service and accepts compact UTF-8 JSON:
 Example:
 
 ```json
-{"v":1,"n":1783759000,"ts":1783759000,"q":[[42,300,1783776735,0],[11,10080,1784363535,0]],"t":[0,0,0,0,2111540267],"rc":3,"rcv":true,"c":182934,"p":"prolite","pr":"openai","m":"gpt-5.6-sol","a":"Work","s":"thinking","r":false,"af":true,"lt":true}
+{"v":1,"n":1783759000,"ts":1783759000,"q":[[42,300,1783776735,0],[11,10080,1784363535,0]],"t":[0,0,0,0,2111540267],"rc":3,"rcv":true,"c":182934,"p":"prolite","pr":"openai","m":"gpt-5.6-sol","a":"Work","s":"thinking","ap":false,"r":false,"af":true,"lt":true}
 ```
 
 ## Fields
@@ -37,6 +37,7 @@ Example:
 | `m` | Model name |
 | `a` | Optional account label |
 | `s` | AI task status (`idle`, `thinking`, or `need approval`) |
+| `ap` | Explicit pending-approval signal; when true, the device displays approval ahead of every other task status |
 | `r` | Whether the selected quota is below the alert threshold or explicitly limited |
 | `af` | Account snapshot freshness; `false` keeps the device in `DATA STALE` even when BLE heartbeats continue |
 | `lt` | `true` when `t[4]` is an account lifetime total; otherwise it is a local daily total |

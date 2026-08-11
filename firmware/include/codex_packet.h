@@ -81,6 +81,7 @@ struct CodexPacket {
   char model[24]{};
   char account_label[20]{};
   char status[32]{};
+  bool needs_approval = false;
   uint8_t test_state = kTestNone;
 };
 

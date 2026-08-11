@@ -408,6 +408,7 @@ bool packetDataChanged(const CodexPacket& left, const CodexPacket& right) {
          strcmp(left.model, right.model) != 0 ||
          strcmp(left.account_label, right.account_label) != 0 ||
          strcmp(left.status, right.status) != 0 ||
+         left.needs_approval != right.needs_approval ||
          left.test_state != right.test_state;
 }
 
@@ -526,6 +527,7 @@ class DataCallbacks final : public BLECharacteristicCallbacks {
     strlcpy(packet.model, doc["m"] | "", sizeof(packet.model));
     strlcpy(packet.account_label, doc["a"] | "", sizeof(packet.account_label));
     strlcpy(packet.status, doc["s"] | "", sizeof(packet.status));
+    packet.needs_approval = doc["ap"] | false;
     packet.test_state = min<uint8_t>(
         doc["x"] | 0, codex_meter::kTestNeedApproval);
     if (packet.plan[0]) packet.flags |= codex_meter::kPlanValid;
@@ -1069,10 +1071,14 @@ void loop() {
     delay(20);
     return;
   }
-  const bool blinkThinking = ui::page() == ui::Page::Dashboard &&
+  const bool animateStatus = ui::page() == ui::Page::Dashboard &&
       hasSnapshot && snapshotIsFresh &&
-      (strcmp(snapshot.status, "thinking") == 0 ||
-       snapshot.test_state == codex_meter::kTestThinking);
+      (snapshot.needs_approval ||
+       strcmp(snapshot.status, "thinking") == 0 ||
+       strcmp(snapshot.status, "need approval") == 0 ||
+       strcmp(snapshot.status, "needs approval") == 0 ||
+       snapshot.test_state == codex_meter::kTestThinking ||
+       snapshot.test_state == codex_meter::kTestNeedApproval);
   const bool animateTokens = ui::tokenAnimationActive();
   int animatedBatteryPercent = batteryPercent;
   bool animatedBatteryCharging = batteryCharging;
@@ -1087,7 +1093,7 @@ void loop() {
   const bool animateBattery = animatedBatteryCharging;
   const bool animateUpdate = ui::updateAnimationActive();
   const bool animateUi =
-      blinkThinking || animateTokens || animateBattery || animateUpdate;
+      animateStatus || animateTokens || animateBattery || animateUpdate;
   const uint32_t renderInterval = animateUi
                                       ? ui_theme::active().motion.animationFrameMs
                                       : kRenderIntervalMs;
@@ -1095,8 +1101,8 @@ void loop() {
     lastRenderMs = millis();
     if (animateTokens) ui::renderTokenAnimationFrame();
     if (animateUpdate) ui::renderUpdateAnimationFrame();
-    if (blinkThinking) {
-      ui::renderThinkingAnimationFrame(&snapshot, snapshotIsFresh);
+    if (animateStatus) {
+      ui::renderStatusAnimationFrame(&snapshot, snapshotIsFresh);
     }
     if (animateBattery) {
       ui::renderBatteryAnimationFrame(

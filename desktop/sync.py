@@ -1609,6 +1609,7 @@ def build_packet(
         "m": _bounded_text(snapshot.get("model"), 23),
         "a": _bounded_text(account_label, 19),
         "s": _bounded_text(status, 31),
+        "ap": bool(snapshot.get("needs_approval")),
         "r": reached,
         "af": not bool(snapshot.get("account_data_stale", False)),
         "lt": snapshot.get("token_scope") == "account_lifetime",

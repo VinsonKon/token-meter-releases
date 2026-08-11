@@ -37,8 +37,8 @@ bool tokenAnimationActive();
 bool updateAnimationActive();
 void renderTokenAnimationFrame();
 void renderUpdateAnimationFrame();
-void renderThinkingAnimationFrame(const codex_meter::CodexPacket* snapshot,
-                                  bool fresh);
+void renderStatusAnimationFrame(const codex_meter::CodexPacket* snapshot,
+                                bool fresh);
 void renderBatteryAnimationFrame(const codex_meter::CodexPacket* snapshot,
                                  bool fresh, int batteryPercent,
                                  bool batteryCharging);

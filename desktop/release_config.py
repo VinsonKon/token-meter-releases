@@ -1,6 +1,6 @@
 """Shared release identity for GitHub-based client and firmware updates."""
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 RELEASE_REPOSITORY = "VinsonKon/token-meter-releases"
 RELEASE_DOWNLOAD_BASE_URL = (
     f"https://github.com/{RELEASE_REPOSITORY}/releases"

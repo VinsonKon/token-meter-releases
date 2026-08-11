@@ -303,6 +303,7 @@ class CodexApprovalStateTests(unittest.TestCase):
         sync._refresh_activity(snapshot)
 
         self.assertEqual("need approval", packet["s"])
+        self.assertTrue(packet["ap"])
         self.assertEqual("need approval", snapshot["activity"])
 
     def test_approval_is_aggregated_across_concurrent_sessions(self) -> None:
@@ -316,7 +317,7 @@ class CodexApprovalStateTests(unittest.TestCase):
             )
             sessions.mkdir(parents=True)
             waiting = sessions / "waiting.jsonl"
-            completed = sessions / "completed.jsonl"
+            thinking = sessions / "thinking.jsonl"
             waiting.write_text(
                 _event({"type": "task_started"})
                 + _response({
@@ -329,16 +330,22 @@ class CodexApprovalStateTests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-            completed.write_text(
-                _event({"type": "task_started"})
-                + _event({"type": "task_complete"}),
+            thinking.write_text(
+                _event({"type": "task_started"}),
                 encoding="utf-8",
             )
 
             active, needs_approval, _ = sync.read_codex_runtime_state(home)
+            packet = json.loads(sync.build_packet({
+                "task_active": active,
+                "needs_approval": needs_approval,
+                "activity": "thinking",
+            }))
 
             self.assertTrue(active)
             self.assertTrue(needs_approval)
+            self.assertEqual("need approval", packet["s"])
+            self.assertTrue(packet["ap"])
         sync._codex_caches.clear()
 
 

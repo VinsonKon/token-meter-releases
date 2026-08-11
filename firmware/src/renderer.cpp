@@ -388,6 +388,45 @@ uint16_t textWidth(const String& text, const AA4Font* font) {
   return width;
 }
 
+void drawTextCenteredInRect(const String& text, int16_t x, int16_t y,
+                            int16_t width, int16_t height, uint16_t color,
+                            const AA4Font* font) {
+  AA4Font loadedFont;
+  memcpy_P(&loadedFont, font, sizeof(loadedFont));
+  int16_t cursorX = 0;
+  int16_t left = 0;
+  int16_t top = 0;
+  int16_t right = 0;
+  int16_t bottom = 0;
+  bool hasInk = false;
+  for (size_t i = 0; i < text.length(); ++i) {
+    const AA4Glyph glyph = readGlyph(font, text[i], &loadedFont);
+    if (glyph.width > 0 && glyph.height > 0) {
+      const int16_t glyphLeft = cursorX + glyph.xOffset;
+      const int16_t glyphTop = glyph.yOffset;
+      const int16_t glyphRight = glyphLeft + glyph.width;
+      const int16_t glyphBottom = glyphTop + glyph.height;
+      if (!hasInk) {
+        left = glyphLeft;
+        top = glyphTop;
+        right = glyphRight;
+        bottom = glyphBottom;
+        hasInk = true;
+      } else {
+        left = min(left, glyphLeft);
+        top = min(top, glyphTop);
+        right = max(right, glyphRight);
+        bottom = max(bottom, glyphBottom);
+      }
+    }
+    cursorX += glyph.xAdvance;
+  }
+  if (!hasInk) return;
+  const int16_t drawX = x + (width - (right - left)) / 2 - left;
+  const int16_t baseline = y + (height - (bottom - top)) / 2 - top;
+  drawText(text, drawX, baseline, color, font);
+}
+
 void drawRight(const String& text, int16_t right, int16_t baseline,
                uint16_t color, const AA4Font* font) {
   drawText(text, right - static_cast<int16_t>(textWidth(text, font)),
@@ -623,7 +662,9 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
   uint16_t color;
   uint16_t glowColor = 0;
   bool showDot = false;
-  bool animateThinking = false;
+  bool animatePulse = false;
+  bool animateThinkingDots = false;
+  bool centerTextPrecisely = false;
   int16_t width = 180;
   if (!packet ||
       (packet &&
@@ -635,17 +676,21 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
     label = "DATA STALE";
     color = theme().colors.warning;
     width = 180;
-  } else if (strcmp(packet->status, "need approval") == 0 ||
+  } else if (packet->needs_approval ||
+             strcmp(packet->status, "need approval") == 0 ||
              strcmp(packet->status, "needs approval") == 0) {
     label = "NEED APPROVAL";
     color = theme().colors.limitStatus;
     glowColor = theme().colors.limitGlow;
+    animatePulse = true;
+    centerTextPrecisely = true;
     width = 230;
   } else if (strcmp(packet->status, "thinking") == 0) {
     label = "THINKING...";
     color = theme().colors.status;
     showDot = true;
-    animateThinking = true;
+    animatePulse = true;
+    animateThinkingDots = true;
     width = 190;
   } else if (packet->status[0] != '\0' && strcmp(packet->status, "idle") != 0) {
     label = packet->status;
@@ -662,7 +707,7 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
   float pulse = 1.0f;
   float normalizedPulse = 1.0f;
   float animationPhase = 0.0f;
-  if (animateThinking) {
+  if (animatePulse) {
     const uint32_t kCycleMs = theme().motion.thinkingCycleMs;
     const uint32_t cycleMs = millis() % kCycleMs;
     animationPhase = static_cast<float>(cycleMs) / kCycleMs;
@@ -683,7 +728,7 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
       blend565(theme().colors.background, theme().colors.primaryText,
                cardOpacity);
   const uint8_t glowAlpha =
-      animateThinking
+      animatePulse
           ? static_cast<uint8_t>(
                 theme().motion.thinkingGlowMinAlpha +
                 (theme().motion.thinkingGlowMaxAlpha -
@@ -704,7 +749,7 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
       x + (showDot
                ? 40
                : (width - textWidth(label, theme().type.strong24)) / 2);
-  if (animateThinking) {
+  if (animateThinkingDots) {
     const String word = "THINKING";
     drawText(word, textX, 55, foreground, theme().type.strong24);
     const int16_t dotWidth = textWidth(".", theme().type.strong24);
@@ -724,6 +769,10 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
       drawText(".", dotsX + dot * dotWidth, 55, dotColor,
                theme().type.strong24);
     }
+  } else if (centerTextPrecisely) {
+    drawTextCenteredInRect(label, x, theme().metrics.statusY, width,
+                           theme().metrics.statusHeight, foreground,
+                           theme().type.strong24);
   } else {
     drawText(label, textX, 55, foreground, theme().type.strong24);
   }
@@ -732,6 +781,7 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
 
 bool statusWouldBeVisible(const codex_meter::CodexPacket* packet, bool fresh) {
   if (!packet || !fresh) return true;
+  if (packet->needs_approval) return true;
   if (packet->test_state == codex_meter::kTestThinking ||
       packet->test_state == codex_meter::kTestNeedApproval ||
       packet->test_state == codex_meter::kTestDataStale ||
@@ -1248,17 +1298,25 @@ void renderUpdateAnimationFrame() {
   flushRegion(regionX, regionY, regionWidth, regionHeight);
 }
 
-void renderThinkingAnimationFrame(const codex_meter::CodexPacket* packet,
-                                  bool fresh) {
+void renderStatusAnimationFrame(const codex_meter::CodexPacket* packet,
+                                bool fresh) {
   if (currentPage != Page::Dashboard || !packet || !fresh || !gfx) return;
-  codex_meter::CodexPacket thinkingPacket;
-  if (packet->test_state == codex_meter::kTestThinking) {
-    thinkingPacket = *packet;
-    thinkingPacket.flags &= ~codex_meter::kRateLimitReached;
-    strlcpy(thinkingPacket.status, "thinking", sizeof(thinkingPacket.status));
-    packet = &thinkingPacket;
+  codex_meter::CodexPacket statusPacket;
+  if (packet->test_state == codex_meter::kTestThinking ||
+      packet->test_state == codex_meter::kTestNeedApproval) {
+    statusPacket = *packet;
+    statusPacket.flags &= ~codex_meter::kRateLimitReached;
+    strlcpy(statusPacket.status,
+            packet->test_state == codex_meter::kTestThinking
+                ? "thinking"
+                : "need approval",
+            sizeof(statusPacket.status));
+    packet = &statusPacket;
   }
-  if (strcmp(packet->status, "thinking") != 0) return;
+  if (!packet->needs_approval &&
+      strcmp(packet->status, "thinking") != 0 &&
+      strcmp(packet->status, "need approval") != 0 &&
+      strcmp(packet->status, "needs approval") != 0) return;
 
   constexpr int16_t kRegionX = 0;
   constexpr int16_t kRegionY = 0;
