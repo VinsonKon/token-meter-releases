@@ -1216,6 +1216,16 @@ def _read_codex_usage(
     snapshot["source"] = session_source or snapshot.get(
         "account_source", "Codex App Server"
     )
+    # The device displays official quota windows but replaces the official
+    # lifetime usage total with locally parsed daily totals below. A prolonged
+    # usage-summary outage must therefore not mask otherwise current device
+    # data with DATA STALE.
+    snapshot["device_data_stale"] = bool(
+        snapshot.get(
+            "rate_limit_data_stale",
+            snapshot.get("account_data_stale", False),
+        )
+    )
     daily_totals, daily_by_model, latest_activity = (
         _daily_cost_token_totals(codex_home)
     )
@@ -1611,7 +1621,10 @@ def build_packet(
         "s": _bounded_text(status, 31),
         "ap": bool(snapshot.get("needs_approval")),
         "r": reached,
-        "af": not bool(snapshot.get("account_data_stale", False)),
+        "af": not bool(snapshot.get(
+            "device_data_stale",
+            snapshot.get("account_data_stale", False),
+        )),
         "lt": snapshot.get("token_scope") == "account_lifetime",
         "rc": _bounded_u16(snapshot.get("reset_count")),
         "rcv": bool(
@@ -1864,6 +1877,31 @@ def _sync_summary(snapshot: dict[str, Any], packet: bytes, address: str,
     reset_value = (
         str(snapshot.get("reset_count", 0)) if reset_available else "--"
     )
+    account_detail = ""
+    if snapshot.get("source_id") == source_registry.CODEX_SOURCE:
+        rate_fetched_at = (
+            _valid_positive_number(snapshot.get("rate_limits_fetched_at"))
+            or 0
+        )
+        quota_age = (
+            "unknown"
+            if rate_fetched_at <= 0
+            else f"{max(0, round(time.time() - rate_fetched_at))}s"
+        )
+        device_stale = bool(snapshot.get(
+            "device_data_stale",
+            snapshot.get("account_data_stale", False),
+        ))
+        warning = str(snapshot.get("account_error") or "").replace(
+            "\n", " "
+        ).strip()
+        warning_detail = (
+            f", refresh warning: {warning[:160]}" if warning else ""
+        )
+        account_detail = (
+            f" | account {'stale' if device_stale else 'fresh'} "
+            f"(quota age {quota_age}{warning_detail})"
+        )
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     return (
         f"[{stamp}] synced+ACK {len(packet)} JSON bytes to {address}: "
@@ -1874,6 +1912,7 @@ def _sync_summary(snapshot: dict[str, Any], packet: bytes, address: str,
         f"({snapshot.get('reset_count_source', 'unavailable')}) | "
         f"cost {'--' if cost_cny is None else f'RMB {cost_cny:.2f}'} "
         f"({cost_source}, USD/CNY {usd_cny:g} {fx_source})"
+        f"{account_detail}"
     )
 
 

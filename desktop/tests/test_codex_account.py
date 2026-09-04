@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -247,7 +248,71 @@ class AccountUsageTests(unittest.TestCase):
             second["tokens"]["total_tokens"],
         )
         self.assertTrue(second["usage_stale"])
+        self.assertFalse(second["rate_limit_data_stale"])
+        self.assertTrue(second["usage_data_stale"])
         self.assertTrue(second["account_data_stale"])
+
+    def test_transient_usage_failure_keeps_recent_cache_fresh(self) -> None:
+        class FakeClient:
+            fail_usage = False
+
+            def request(self, method: str, _params=None):
+                if method == "account/read":
+                    return {
+                        "account": {
+                            "type": "chatgpt",
+                            "email": "user@example.com",
+                        },
+                    }
+                if method == "account/rateLimits/read":
+                    return rate_result()
+                if method == "account/usage/read":
+                    if self.fail_usage:
+                        raise codex_account.CodexTransportError(
+                            "one-shot usage timeout"
+                        )
+                    return usage_result()
+                raise AssertionError(method)
+
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "account.json"
+            with mock.patch.object(
+                codex_account, "_client_for", return_value=client
+            ), mock.patch.object(
+                codex_account.time, "time", return_value=1_000.0
+            ):
+                first = codex_account.read_account_snapshot(
+                    cache_path, force=True
+                )
+
+            # Simulate a desktop-client restart: the disk cache is recent, but
+            # the first poll in the new process must validate every endpoint.
+            cache_key = (
+                os.path.normcase(str(cache_path.expanduser().resolve()))
+                + "|"
+                + codex_account._codex_home_key(None)
+            )
+            codex_account._validated_cache_keys.discard(cache_key)
+            client.fail_usage = True
+            with mock.patch.object(
+                codex_account, "_client_for", return_value=client
+            ), mock.patch.object(
+                codex_account.time, "time", return_value=1_006.0
+            ):
+                second = codex_account.read_account_snapshot(
+                    cache_path
+                )
+
+        self.assertEqual(
+            first["tokens"]["total_tokens"],
+            second["tokens"]["total_tokens"],
+        )
+        self.assertTrue(second["usage_stale"])
+        self.assertFalse(second["usage_data_stale"])
+        self.assertFalse(second["account_data_stale"])
+        self.assertIn("one-shot usage timeout", second["account_error"])
+        self.assertTrue(json.loads(sync.build_packet(second))["af"])
 
     def test_account_switch_never_mixes_new_quota_with_old_usage(self) -> None:
         class FakeClient:
@@ -321,6 +386,32 @@ class DevicePacketSelectionTests(unittest.TestCase):
         message = json.loads(sync.build_packet(snapshot))
 
         self.assertFalse(message["af"])
+
+    def test_unused_official_usage_staleness_does_not_mask_device(self) -> None:
+        snapshot = self.snapshot()
+        snapshot["account_data_stale"] = True
+        snapshot["device_data_stale"] = False
+
+        message = json.loads(sync.build_packet(snapshot))
+
+        self.assertTrue(message["af"])
+
+    def test_sync_summary_reports_freshness_and_refresh_warning(self) -> None:
+        snapshot = self.snapshot()
+        snapshot.update({
+            "source_id": "codex",
+            "rate_limits_fetched_at": 1_000.0,
+            "device_data_stale": False,
+            "account_error": "usage refresh timed out",
+        })
+        packet = sync.build_packet(snapshot)
+        with mock.patch.object(sync.time, "time", return_value=1_006.0):
+            summary = sync._sync_summary(
+                snapshot, packet, "device", 1.0, "test", 7.0, "test"
+            )
+
+        self.assertIn("account fresh (quota age 6s", summary)
+        self.assertIn("refresh warning: usage refresh timed out", summary)
 
     def test_unavailable_reset_count_is_explicit_on_wire(self) -> None:
         snapshot = self.snapshot()

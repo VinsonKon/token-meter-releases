@@ -39,7 +39,7 @@ Example:
 | `s` | AI task status (`idle`, `thinking`, or `need approval`) |
 | `ap` | Explicit pending-approval signal; when true, the device displays approval ahead of every other task status |
 | `r` | Whether the selected quota is below the alert threshold or explicitly limited |
-| `af` | Account snapshot freshness; `false` keeps the device in `DATA STALE` even when BLE heartbeats continue |
+| `af` | Device-visible quota freshness; `false` keeps the device in `DATA STALE` even when BLE heartbeats continue. A transient refresh failure continues using a recent cached quota for up to 120 seconds, and local daily token totals do not affect this flag. |
 | `lt` | `true` when `t[4]` is an account lifetime total; otherwise it is a local daily total |
 | `x` | Optional display-test state (`1`–`16`); omitted for normal live data |
 

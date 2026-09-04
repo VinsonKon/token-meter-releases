@@ -672,10 +672,6 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
     label = "WAITING FOR SYNC";
     color = theme().colors.warning;
     width = 260;
-  } else if (!fresh) {
-    label = "DATA STALE";
-    color = theme().colors.warning;
-    width = 180;
   } else if (packet->needs_approval ||
              strcmp(packet->status, "need approval") == 0 ||
              strcmp(packet->status, "needs approval") == 0) {
@@ -685,6 +681,10 @@ bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
     animatePulse = true;
     centerTextPrecisely = true;
     width = 230;
+  } else if (!fresh) {
+    label = "DATA STALE";
+    color = theme().colors.warning;
+    width = 180;
   } else if (strcmp(packet->status, "thinking") == 0) {
     label = "THINKING...";
     color = theme().colors.status;
@@ -1300,7 +1300,7 @@ void renderUpdateAnimationFrame() {
 
 void renderStatusAnimationFrame(const codex_meter::CodexPacket* packet,
                                 bool fresh) {
-  if (currentPage != Page::Dashboard || !packet || !fresh || !gfx) return;
+  if (currentPage != Page::Dashboard || !packet || !gfx) return;
   codex_meter::CodexPacket statusPacket;
   if (packet->test_state == codex_meter::kTestThinking ||
       packet->test_state == codex_meter::kTestNeedApproval) {
@@ -1313,10 +1313,11 @@ void renderStatusAnimationFrame(const codex_meter::CodexPacket* packet,
             sizeof(statusPacket.status));
     packet = &statusPacket;
   }
-  if (!packet->needs_approval &&
-      strcmp(packet->status, "thinking") != 0 &&
-      strcmp(packet->status, "need approval") != 0 &&
-      strcmp(packet->status, "needs approval") != 0) return;
+  const bool approvalPending = packet->needs_approval ||
+      strcmp(packet->status, "need approval") == 0 ||
+      strcmp(packet->status, "needs approval") == 0;
+  if (!fresh && !approvalPending) return;
+  if (!approvalPending && strcmp(packet->status, "thinking") != 0) return;
 
   constexpr int16_t kRegionX = 0;
   constexpr int16_t kRegionY = 0;

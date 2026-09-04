@@ -647,12 +647,14 @@ def _clear_account_scoped_cache(snapshot: dict[str, Any]) -> None:
         "rate_limits_by_limit_id",
         "rate_limits_fetched_at",
         "rate_limits_stale",
+        "rate_limit_data_stale",
         "tokens",
         "token_scope",
         "usage_summary",
         "daily_usage_buckets",
         "usage_fetched_at",
         "usage_stale",
+        "usage_data_stale",
         "reset_count",
         "reset_count_available",
         "reset_count_source",
@@ -801,8 +803,6 @@ def read_account_snapshot(
                 errors.append(str(exc))
                 rate_failed = True
                 _record_failure(cache_key, "rate_limits")
-                if first_process_validation:
-                    snapshot["rate_limits_fetched_at"] = 0
             else:
                 completed_at = time.time()
                 snapshot.update(normalized)
@@ -834,8 +834,6 @@ def read_account_snapshot(
                 errors.append(str(exc))
                 usage_failed = True
                 _record_failure(cache_key, "usage")
-                if first_process_validation:
-                    snapshot["usage_fetched_at"] = 0
             else:
                 completed_at = time.time()
                 tokens = normalized_usage.pop("tokens")
@@ -847,8 +845,6 @@ def read_account_snapshot(
                 else:
                     usage_failed = True
                     _record_failure(cache_key, "usage")
-                    if first_process_validation:
-                        snapshot["usage_fetched_at"] = 0
                     errors.append(
                         "account/usage/read did not return "
                         "summary.lifetimeTokens"
@@ -883,15 +879,23 @@ def read_account_snapshot(
         )
         usage_last_success = _timestamp(snapshot.get("usage_fetched_at"))
         current_time = time.time()
-        snapshot["account_data_stale"] = (
-            identity_stale
-            or bool(snapshot.get("rate_limits_stale"))
-            or bool(snapshot.get("usage_stale"))
+        # A failed refresh is a warning, not proof that the last successful
+        # values are already unusable. Keep serving recent cache entries during
+        # transient App Server timeouts and only declare data stale after the
+        # explicit age grace period (or when the corresponding data is absent).
+        snapshot["rate_limit_data_stale"] = (
+            not isinstance(snapshot.get("rate_limits"), dict)
             or _data_age(current_time, rate_last_success)
             > ACCOUNT_STALE_AFTER_SECONDS
-            or not snapshot.get("tokens")
+        )
+        snapshot["usage_data_stale"] = (
+            not snapshot.get("tokens")
             or _data_age(current_time, usage_last_success)
             > ACCOUNT_STALE_AFTER_SECONDS
+        )
+        snapshot["account_data_stale"] = (
+            bool(snapshot["rate_limit_data_stale"])
+            or bool(snapshot["usage_data_stale"])
         )
         snapshot["fetched_at"] = max(
             rate_last_success,

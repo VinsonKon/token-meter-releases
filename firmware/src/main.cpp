@@ -1071,14 +1071,16 @@ void loop() {
     delay(20);
     return;
   }
-  const bool animateStatus = ui::page() == ui::Page::Dashboard &&
-      hasSnapshot && snapshotIsFresh &&
+  const bool approvalPending = hasSnapshot &&
       (snapshot.needs_approval ||
-       strcmp(snapshot.status, "thinking") == 0 ||
        strcmp(snapshot.status, "need approval") == 0 ||
        strcmp(snapshot.status, "needs approval") == 0 ||
-       snapshot.test_state == codex_meter::kTestThinking ||
        snapshot.test_state == codex_meter::kTestNeedApproval);
+  const bool thinking = hasSnapshot && snapshotIsFresh &&
+      (strcmp(snapshot.status, "thinking") == 0 ||
+       snapshot.test_state == codex_meter::kTestThinking);
+  const bool animateStatus = ui::page() == ui::Page::Dashboard &&
+      (approvalPending || thinking);
   const bool animateTokens = ui::tokenAnimationActive();
   int animatedBatteryPercent = batteryPercent;
   bool animatedBatteryCharging = batteryCharging;
