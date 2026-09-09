@@ -1779,9 +1779,19 @@ async def write_packet_with_ack(client, packet: bytes,
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise TimeoutError(f"Device ACK timeout for sequence {sequence}")
-        ack_sequence = await asyncio.wait_for(ack_queue.get(), remaining)
+        try:
+            ack_sequence = await asyncio.wait_for(ack_queue.get(), remaining)
+        except TimeoutError as exc:
+            # asyncio.TimeoutError has an empty message; keep the failed
+            # protocol stage visible rather than logging a blank reconnect.
+            raise TimeoutError(f"Device ACK timeout for sequence {sequence}") from exc
         if ack_sequence == sequence:
             return
+
+
+def connection_error_detail(stage: str, error: Exception) -> str:
+    detail = str(error).strip()
+    return f"{stage}: {type(error).__name__}" + (f": {detail}" if detail else "")
 
 
 def _client_options() -> dict[str, Any]:
@@ -2330,6 +2340,7 @@ async def run(
             device_change_event.clear()
             preferred_address = args.address
             backoff = 1.0
+        stage = "device discovery"
         try:
             if preferred_address:
                 _emit(
@@ -2351,6 +2362,7 @@ async def run(
                         "is unavailable"
                     )
                 raise TimeoutError(f"Could not find BLE device '{DEVICE_NAME}'")
+            stage = "BLE connect/service discovery"
             async with BleakClient(
                 device, timeout=args.scan_timeout, **_client_options()
             ) as client:
@@ -2370,6 +2382,7 @@ async def run(
                     f"Connected to {device_name} ({preferred_address})",
                     status_callback,
                 )
+                stage = "device info read"
                 device_info = await update_manager.read_device_info(client)
                 if device_info.get("skin") == 1:
                     try:
@@ -2382,6 +2395,7 @@ async def run(
                     except Exception:
                         pass
                 backoff = 1.0
+                stage = "data sync/ACK"
                 await monitor_connection(
                     client, preferred_address, args, codex_home, claude_home,
                     account_cache, usd_cny, fx_source, stop_event,
@@ -2407,7 +2421,8 @@ async def run(
                 device_change_event.clear()
                 backoff = 1.0
                 continue
-            _emit(f"sync reconnecting: {exc}", status_callback, error=True)
+            _emit(f"sync reconnecting: {connection_error_detail(stage, exc)}",
+                  status_callback, error=True)
             await _sleep_until_retry(backoff, stop_event, device_change_event)
             backoff = min(30.0, backoff * 2.0)
     _emit("Sync stopped", status_callback)

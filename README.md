@@ -1,15 +1,25 @@
 # Codex Token Monitor for Waveshare AMOLED 2.16
 
-## Version 1.1.2 — 独立皮肤包与运行时切换
+## Version 1.1.4 — 同步恢复、Astra 计价与更高动画帧率
 
-客户端与固件统一为 **1.1.2**。先更新客户端，再通过 `Updates` 更新设备固件；
-之后右键通知区域图标 → **皮肤 → 导入皮肤包…**，即可导入和切换，无需每次刷固件。
+客户端与固件统一为 **1.1.4**。先更新客户端，再通过 `Updates` 更新设备固件。
+
+- 修复显示测试或模拟更新状态退出后，更新页面提前返回可能阻塞真实数据接收、持续显示 `DATA STALE` 的问题；真实 OTA 写入与重启流程仍受保护。
+- 蓝牙重连日志显示失败阶段与异常类型；ACK 超时保留等待的序列号，便于区分扫描、连接和数据应答问题。
+- 收录 `gpt-6-astra` 的基础 API 等价成本估算；上下文/服务层级与费用边界见下方定价说明。
+- 动画调度目标从约 30 FPS 提高至 60 FPS（16,667 微秒），处理轮询偏差并跳过落后的帧，不改变动画循环速度、布局或配色。
+- **实机边界：** 当前 Pixel Glow 皮肤的 DATA STALE 软件计数约 60 FPS；真实 THINKING 的 10 秒采样约 47.84 FPS，仍未稳定达到 60 FPS。这不是面板物理刷新率测量，也不承诺所有状态或皮肤均为 60 FPS。
+- 升级实机核对了固件版本、OTA 槽切换与皮肤哈希保留；恢复正常客户端后连续 134 秒收到 8 次真实同步回执，无重连错误，RMB 持续更新。143 项客户端测试、固件构建、调度/同步/动画/皮肤存储回归检查通过。
+
+### 独立皮肤包与运行时切换
+
+右键通知区域图标 → **皮肤 → 导入皮肤包…**，即可导入和切换，无需每次刷固件。
 
 - `codex-classic-glow-1.0.0.meterskin`：原版完整圆角胶囊、文字/圆点呼吸和外围光晕。Thinking 与审批呼吸；Stale / Waiting 按原版保持静态。
 - `codex-pixel-glow-1.0.0.meterskin`：当前像素版，Thinking 为 1.5 秒循环和黄绿蓝渐变，审批为 `#FF6B6B`，Stale 为 `#E6AC38`，Stale / Waiting 无底板。
 - 两个包均独立包含布局、配色和四个状态的表现数据；可编辑源文件分别在 `skins/` 下。包版本与软件版本独立。
 - 新导入皮肤最大 384 KiB，传输失败保留当前选择，换肤不改变审批优先级或 Token 统计。
-- 验证：132 项客户端测试、固件解析/动画/存储主机测试，以及实机双皮肤四状态切换、中断保护和真实同步恢复通过。新原版包的真实断电保留和原生菜单鼠标点击尚未验证。
+- v1.1.2 已验证双皮肤四状态切换、中断保护和真实同步恢复；本次两个皮肤包内容不变。原版包的真实断电保留和原生菜单鼠标点击尚未验证。
 
 Release 附件包括客户端、OTA / factory 固件、更新清单、两个独立皮肤包、完整 ZIP 和 SHA-256 校验清单。
 
@@ -146,7 +156,7 @@ ACK 使用毫秒级进程内单调序列号，连续点击 `Sync now` 也不会�
 Claude Code 的本地日志目前提供当天 token 与最近型号，但不提供 Codex 风格的
 5H/WEEK 配额及 banked resets，因此切换到 Claude Code 时这两张卡显示 `--`。
 金额按模型分别估算；未知模型只跳过对应小计，不会让其他已知模型的 RMB 总额变成
-`--`。当天只有未知模型用量时显示 `RMB 0.00`。
+`--`。当天只有未知模型用量时显示 `RMB --`；当天没有用量时显示 `RMB 0.00`。
 
 设备连续 1 小时没有 token、额度、RMB、状态、重置次数等有效数据变化时，会发送
 `DISPOFF + SLPIN` 让 AMOLED 进入面板休眠并停止界面动画。同步器的 30 秒保活心跳
@@ -296,14 +306,21 @@ powershell -ExecutionPolicy Bypass -File .\build-release.ps1
 EXE 与 OTA 固件，避免发布切换期间混用两个版本。当前实现使用 GitHub HTTPS 与双端
 SHA-256 完整性校验，尚未加入独立发布签名。
 
-同步器默认自动估算当天的人民币成本。它先按模型的标准 API 单价分别计算非缓存输入、缓存输入和输出 token 的美元成本，再乘以 USD/CNY 汇率。以 GPT-5.6 Sol 为例：
+同步器默认自动估算当天的人民币成本。它先按模型配置的 API 等价单价分别计算非缓存输入、缓存输入和输出 token 的美元成本，再乘以 USD/CNY 汇率。以 GPT-6 Astra 的 Standard 短上下文价格为例：
 
 ```text
-USD = ((input - cached) × 5.00 + cached × 0.50 + output × 30.00) / 1,000,000
+USD = ((input - cached) × 10.00 + cached × 1.00 + output × 50.00) / 1,000,000
 CNY = USD × USD/CNY
 ```
 
-`output_tokens` 已包含 reasoning token，因此不会把 `reasoning_output_tokens` 再计费一次。模型单价参照 [OpenAI Codex rate card](https://help.openai.com/en/articles/20001106-codex-rate-card) 和 [GPT-5.6 Sol API pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol)。这个数值是标准 API 等价成本估算，不是 Pro 订阅实际扣款；套餐内用量优先使用，超过额度后才可能消耗购买的 credits。
+`output_tokens` 已包含 reasoning token，因此不会把 `reasoning_output_tokens` 再计费一次。GPT-6 Astra 单价于 2026-09-09 核对 [OpenAI 官方 API 价格表](https://developers.openai.com/api/docs/pricing)，单位为美元 / 百万 Token：
+
+| Standard 上下文档位 | 输入 | 缓存输入 | 缓存写入 | 输出 |
+| --- | ---: | ---: | ---: | ---: |
+| 短上下文 | 10.00 | 1.00 | 12.50 | 50.00 |
+| 长上下文 | 20.00 | 2.00 | 25.00 | 75.00 |
+
+当前本地日志聚合没有按上下文档位、缓存写入或服务层级拆分费用，因此 Astra 的 RMB 沿用本项目的基础 API 等价估算方式：按 Standard 短上下文的输入、缓存输入和输出三项单价计算，不额外推算缓存写入费、长上下文或 Fast 模式差价。它不是精确 API 账单，也不是 Pro 订阅实际扣款。此前的模型价格配置在本次 Astra 收录中保持不变。
 
 汇率规则参考 token-monitor v0.24.0：`--usd-cny` 手动值 > 24 小时在线/本地缓存 > 内置离线兜底 `6.8`。在线汇率失败不会影响 BLE 同步。`--no-live-fx` 禁用在线查询，`--cost-cny` 仍可直接覆盖最终显示金额。屏幕以 `RMB` 标识金额；每个已知模型按自己的价格计入总额，未知模型只跳过该项。当天没有 Token 数据时 Token 和费用显示 `0`；有用量但模型无法计价时费用显示 `--`，不会沿用上一来源或前一天的费用。
 

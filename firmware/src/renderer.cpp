@@ -18,6 +18,7 @@
 #include "ui_theme.h"
 #include "skin_runtime.h"
 #include "skin_pill.h"
+#include "sync_flow.h"
 
 namespace {
 
@@ -46,6 +47,7 @@ bool isDisplaySleeping = false;
 String currentDeviceName = codex_meter::kDeviceName;
 String currentUpdateStatus;
 uint8_t currentUpdateProgress = 0;
+sync_flow::UpdateOwnership updateOwnership;
 String currentProviderId = "openai";
 String currentPlanLabel;
 status_motion::Transition statusTransition;
@@ -89,6 +91,7 @@ class StatusFrameTimer {
   ~StatusFrameTimer() {
     const uint32_t elapsed = micros() - started_;
     const uint32_t now = millis();
+    const uint32_t budgetUs = theme().motion.animationFrameUs;
     portENTER_CRITICAL(&statusStatsMux);
     if (statusStatsState != state_) {
       statusStats = {};
@@ -101,7 +104,8 @@ class StatusFrameTimer {
     statusTotalUs += elapsed;
     statusStats.averageUs = statusTotalUs / statusStats.frames;
     if (elapsed > statusStats.maximumUs) statusStats.maximumUs = elapsed;
-    if (elapsed > 33000) ++statusStats.overBudget;
+    if (elapsed > budgetUs) ++statusStats.overBudget;
+    if (elapsed > 33000) ++statusStats.over33Ms;
     statusLastFrameMs = now;
     const uint32_t duration = statusLastFrameMs - statusFirstFrameMs;
     statusStats.fpsTenths = duration
@@ -1283,11 +1287,14 @@ void setDeviceName(const String& deviceName) {
   currentDeviceName = deviceName.length() ? deviceName : codex_meter::kDeviceName;
 }
 
-void setUpdateState(const String& status, uint8_t progressPercent) {
+void setUpdateState(const String& status, uint8_t progressPercent,
+                    bool simulated) {
   statusBackground.invalidate();
   currentUpdateStatus = status;
   currentUpdateStatus.trim();
   currentUpdateStatus.toUpperCase();
+  updateOwnership.assign(simulated,
+      !currentUpdateStatus.isEmpty() && !updateStatusEquals("IDLE"));
   currentUpdateProgress = min<uint8_t>(progressPercent, 100);
   if (currentUpdateStatus.isEmpty() || updateStatusEquals("IDLE")) {
     currentUpdateStatus = "";
@@ -1297,6 +1304,15 @@ void setUpdateState(const String& status, uint8_t progressPercent) {
   } else {
     currentPage = Page::Update;
   }
+}
+
+void endDisplayTest() {
+  // A newer real update command takes ownership and must not be dismissed.
+  if (updateOwnership.releaseTest()) setUpdateState("IDLE", 0);
+}
+
+void showDisplayTest() {
+  if (!updateOwnership.realActive()) setPage(Page::Dashboard);
 }
 
 void setBrightness(uint8_t brightnessPercent) {
@@ -1345,8 +1361,11 @@ void render(const codex_meter::CodexPacket* packet, bool fresh,
             bool, int batteryPercent, bool batteryCharging,
             uint32_t receivedAtMs) {
   codex_meter::CodexPacket testPacket;
+  const bool displayTest = packet &&
+      packet->test_state != codex_meter::kTestNone &&
+      !updateOwnership.realActive();
   if (packet) {
-    if (packet->test_state != codex_meter::kTestNone) {
+    if (displayTest) {
       testPacket = *packet;
       testPacket.flags &= ~codex_meter::kRateLimitReached;
       strlcpy(testPacket.status, "idle", sizeof(testPacket.status));
@@ -1362,50 +1381,50 @@ void render(const codex_meter::CodexPacket* packet, bool fresh,
       }
       switch (testPacket.test_state) {
         case codex_meter::kTestNeedApproval:
-          setUpdateState("IDLE", 0);
+          setUpdateState("IDLE", 0, true);
           break;
         case codex_meter::kTestUpdateAvailable:
-          setUpdateState("UPDATE AVAILABLE", 0);
+          setUpdateState("UPDATE AVAILABLE", 0, true);
           break;
         case codex_meter::kTestDownloading:
-          setUpdateState("DOWNLOADING", 35);
+          setUpdateState("DOWNLOADING", 35, true);
           break;
         case codex_meter::kTestInstalling:
-          setUpdateState("INSTALLING", 60);
+          setUpdateState("INSTALLING", 60, true);
           break;
         case codex_meter::kTestVerifying:
-          setUpdateState("VERIFYING", 100);
+          setUpdateState("VERIFYING", 100, true);
           break;
         case codex_meter::kTestRestarting:
-          setUpdateState("RESTARTING", 100);
+          setUpdateState("RESTARTING", 100, true);
           break;
         case codex_meter::kTestUpdateFailed:
-          setUpdateState("UPDATE FAILED", 63);
+          setUpdateState("UPDATE FAILED", 63, true);
           break;
         case codex_meter::kTestRolledBack:
-          setUpdateState("ROLLED BACK", 0);
+          setUpdateState("ROLLED BACK", 0, true);
           break;
         case codex_meter::kTestSingleQuota:
           testPacket.flags &= ~codex_meter::kPrimaryValid;
           testPacket.flags |= codex_meter::kSecondaryValid;
-          setUpdateState("IDLE", 0);
+          setUpdateState("IDLE", 0, true);
           break;
         default:
           if (testPacket.test_state <= codex_meter::kTestLowBattery) {
-            setUpdateState("IDLE", 0);
+            setUpdateState("IDLE", 0, true);
           }
           break;
       }
       packet = &testPacket;
     }
-    if (packet->test_state == codex_meter::kTestCharging) {
+    if (displayTest && packet->test_state == codex_meter::kTestCharging) {
       batteryPercent = 85;
       batteryCharging = true;
-    } else if (packet->test_state == codex_meter::kTestLowBattery) {
+    } else if (displayTest && packet->test_state == codex_meter::kTestLowBattery) {
       batteryPercent = 10;
       batteryCharging = false;
     }
-    if (packet->test_state == codex_meter::kTestDataStale) {
+    if (displayTest && packet->test_state == codex_meter::kTestDataStale) {
       fresh = false;
     }
   }

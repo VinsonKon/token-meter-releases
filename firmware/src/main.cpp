@@ -15,9 +15,11 @@
 #include "board_config.h"
 #include "codex_packet.h"
 #include "firmware_version.h"
+#include "frame_clock.h"
 #include "renderer.h"
 #include "ui_theme.h"
 #include "skin_runtime.h"
+#include "sync_flow.h"
 
 using codex_meter::CodexPacket;
 namespace {
@@ -41,7 +43,7 @@ bool touchAvailable = false;
 volatile bool touchPending = false;
 uint32_t snapshotReceivedMs = 0;
 uint32_t lastDataActivityMs = 0;
-uint32_t lastRenderMs = 0;
+uint32_t lastRenderUs = 0;
 uint32_t lastBatteryReadMs = 0;
 uint32_t lastImuReadMs = 0;
 uint32_t lastTouchMs = 0;
@@ -183,11 +185,12 @@ void refreshDeviceInfo() {
   const int written = snprintf(payload, sizeof(payload),
            "{\"version\":\"%s\",\"protocol\":%u,\"skin\":1,\"ota\":%s,"
            "\"board\":\"%s\",\"slot\":\"%s\","
-           "\"ui\":{\"state\":%u,\"frames\":%u,\"avg_us\":%u,\"max_us\":%u,\"over33\":%u,\"fps10\":%u}}",
+           "\"ui\":{\"state\":%u,\"frames\":%u,\"avg_us\":%u,\"max_us\":%u,\"over33\":%u,\"fps10\":%u,\"budget_us\":%u,\"over_budget\":%u}}",
            codex_meter::kFirmwareVersion, codex_meter::kProtocolVersion,
            next ? "true" : "false", codex_meter::kBoardId,
            running ? running->label : "", stats.state, stats.frames,
-           stats.averageUs, stats.maximumUs, stats.overBudget, stats.fpsTenths);
+           stats.averageUs, stats.maximumUs, stats.over33Ms, stats.fpsTenths,
+           ui_theme::active().motion.animationFrameUs, stats.overBudget);
   if (written < 0 || static_cast<size_t>(written) >= sizeof(payload)) return;
   deviceInfoCharacteristic->setValue(
       reinterpret_cast<uint8_t*>(payload), strlen(payload));
@@ -684,7 +687,7 @@ void renderNow() {
   }
   ui::render(hasSnapshot ? &snapshot : nullptr, snapshotIsFresh, bleConnected,
              batteryPercent, batteryCharging, snapshotReceivedMs);
-  lastRenderMs = millis();
+  lastRenderUs = micros();
 }
 
 bool writeCodecVolume(uint8_t percent) {
@@ -983,6 +986,44 @@ void updateOtaUiTasks() {
   }
 }
 
+// Called before page-specific early returns: UI navigation must never starve
+// the receive queue. Actual OTA writes/reboots remain protected.
+void receiveSnapshot() {
+  if (!sync_flow::canReceive(otaActive, otaRebootAtMs != 0)) return;
+  CodexPacket incoming{};
+  if (xQueueReceive(packetQueue, &incoming, 0) != pdTRUE) return;
+  if (!(incoming.flags & codex_meter::kTokenTotalsValid) && hasSnapshot &&
+      (snapshot.flags & codex_meter::kTokenTotalsValid)) {
+    incoming.input_tokens = snapshot.input_tokens;
+    incoming.cached_input_tokens = snapshot.cached_input_tokens;
+    incoming.output_tokens = snapshot.output_tokens;
+    incoming.reasoning_output_tokens = snapshot.reasoning_output_tokens;
+    incoming.total_tokens = snapshot.total_tokens;
+    incoming.flags |= codex_meter::kTokenTotalsValid;
+  }
+  const bool leavingTest = sync_flow::leavingTest(
+      hasSnapshot, snapshot.test_state, incoming.test_state);
+  const bool dataChanged = !hasSnapshot || packetDataChanged(snapshot, incoming);
+  snapshot = incoming;
+  hasSnapshot = true;
+  snapshotIsFresh = !(snapshot.flags & codex_meter::kAccountDataStale);
+  snapshotReceivedMs = millis();
+  if (dataChanged) lastDataActivityMs = snapshotReceivedMs;
+  if (leavingTest) ui::endDisplayTest();
+  if (snapshot.test_state != codex_meter::kTestNone) {
+    ui::showDisplayTest();
+  }
+  if (snapshot.test_state == codex_meter::kTestNone && dataChanged) {
+    savePacketToNvs(snapshot);
+  }
+  Serial.printf("Accepted JSON #%lu (%u%% / %u%%, test=%u)\n",
+                static_cast<unsigned long>(snapshot.sequence),
+                snapshot.primary.used_percent, snapshot.secondary.used_percent,
+                snapshot.test_state);
+  if (dataChanged || !ui::displaySleeping()) renderNow();
+  notifyAck(snapshot.sequence);
+}
+
 }  // namespace
 
 void setup() {
@@ -1013,6 +1054,7 @@ void setup() {
 
 void loop() {
   updateOtaUiTasks();
+  receiveSnapshot();
   if (skin::poll(bleConnected, otaActive || otaRebootAtMs != 0)) {
     ui::skinChanged();
     renderNow();
@@ -1025,9 +1067,8 @@ void loop() {
     const bool animateUpdate = ui::updateAnimationActive();
     const bool animateBattery = batteryCharging;
     if ((animateUpdate || animateBattery) &&
-        millis() - lastRenderMs >=
-            ui_theme::active().motion.animationFrameMs) {
-      lastRenderMs = millis();
+        frame_clock::due(micros(), ui_theme::active().motion.animationFrameUs,
+                         lastRenderUs)) {
       if (animateUpdate) ui::renderUpdateAnimationFrame();
       if (animateBattery) {
         ui::renderBatteryAnimationFrame(
@@ -1035,7 +1076,7 @@ void loop() {
             batteryPercent, batteryCharging);
       }
     }
-    delay(8);
+    delay((animateUpdate || animateBattery) ? 1 : 8);
     return;
   }
   updateButton();
@@ -1043,38 +1084,6 @@ void loop() {
   if (!ui::displaySleeping()) {
     updateControlTasks();
     updateRotation();
-  }
-
-  CodexPacket incoming{};
-  if (xQueueReceive(packetQueue, &incoming, 0) == pdTRUE) {
-    if (!(incoming.flags & codex_meter::kTokenTotalsValid) && hasSnapshot &&
-        (snapshot.flags & codex_meter::kTokenTotalsValid)) {
-      incoming.input_tokens = snapshot.input_tokens;
-      incoming.cached_input_tokens = snapshot.cached_input_tokens;
-      incoming.output_tokens = snapshot.output_tokens;
-      incoming.reasoning_output_tokens = snapshot.reasoning_output_tokens;
-      incoming.total_tokens = snapshot.total_tokens;
-      incoming.flags |= codex_meter::kTokenTotalsValid;
-    }
-    const bool dataChanged = !hasSnapshot || packetDataChanged(snapshot, incoming);
-    snapshot = incoming;
-    hasSnapshot = true;
-    snapshotIsFresh =
-        !(snapshot.flags & codex_meter::kAccountDataStale);
-    snapshotReceivedMs = millis();
-    if (dataChanged) lastDataActivityMs = snapshotReceivedMs;
-    if (snapshot.test_state != codex_meter::kTestNone) {
-      ui::setPage(ui::Page::Dashboard);
-    }
-    if (snapshot.test_state == codex_meter::kTestNone && dataChanged) {
-      savePacketToNvs(snapshot);
-    }
-    Serial.printf("Accepted JSON #%lu (%u%% / %u%%, test=%u)\n",
-                  static_cast<unsigned long>(snapshot.sequence),
-                  snapshot.primary.used_percent, snapshot.secondary.used_percent,
-                  snapshot.test_state);
-    if (dataChanged || !ui::displaySleeping()) renderNow();
-    notifyAck(snapshot.sequence);
   }
 
   const bool batteryChanged = updateBattery();
@@ -1109,11 +1118,10 @@ void loop() {
   const bool animateUpdate = ui::updateAnimationActive();
   const bool animateUi =
       animateStatus || animateTokens || animateBattery || animateUpdate;
-  const uint32_t renderInterval = animateUi
-                                      ? ui_theme::active().motion.animationFrameMs
-                                      : kRenderIntervalMs;
-  if (millis() - lastRenderMs >= renderInterval) {
-    lastRenderMs = millis();
+  const uint32_t renderIntervalUs = animateUi
+                                      ? ui_theme::active().motion.animationFrameUs
+                                      : kRenderIntervalMs * 1000u;
+  if (frame_clock::due(micros(), renderIntervalUs, lastRenderUs)) {
     if (animateTokens) ui::renderTokenAnimationFrame();
     if (animateUpdate) ui::renderUpdateAnimationFrame();
     if (animateStatus) {
@@ -1127,7 +1135,6 @@ void loop() {
     }
     if (!animateUi) renderNow();
   }
-  // Finer scheduling while an animation is active avoids rounding the 33ms
-  // target up to the old 10ms polling grid; still yield to BLE/FreeRTOS.
+  // Preserve the ~16.667ms animation cadence while yielding to BLE/FreeRTOS.
   delay(animateUi ? 1 : 10);
 }

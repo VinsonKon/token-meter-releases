@@ -23,7 +23,10 @@ void setPage(Page page);
 Page page();
 void setControls(uint8_t brightnessPercent, uint8_t volumePercent);
 void setDeviceName(const String& deviceName);
-void setUpdateState(const String& status, uint8_t progressPercent);
+void setUpdateState(const String& status, uint8_t progressPercent,
+                    bool simulated = false);
+void endDisplayTest();
+void showDisplayTest();
 void setBrightness(uint8_t brightnessPercent);
 void setRotation(uint8_t rotation);
 uint8_t rotation();
@@ -39,6 +42,7 @@ struct StatusRenderStats {
   uint32_t averageUs = 0;
   uint32_t maximumUs = 0;
   uint32_t overBudget = 0;
+  uint32_t over33Ms = 0;  // Legacy threshold, independent of target FPS.
   uint32_t fpsTenths = 0;
 };
 StatusRenderStats statusRenderStats();

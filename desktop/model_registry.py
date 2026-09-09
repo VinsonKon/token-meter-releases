@@ -24,6 +24,11 @@ PROVIDERS: tuple[ProviderDefinition, ...] = (
 
 
 MODELS: tuple[ModelDefinition, ...] = (
+    # Standard, short-context API-equivalent estimate; USD per 1M tokens.
+    # Input / cached input / output. Verified 2026-09-09:
+    # https://developers.openai.com/api/docs/pricing
+    # Daily aggregates do not resolve cache writes, long context or Fast tiers.
+    ModelDefinition("gpt-6-astra", "openai", "GPT-6 Astra", (10.00, 1.00, 50.00)),
     ModelDefinition("gpt-5.6-sol", "openai", "GPT-5.6 Sol", (5.00, 0.50, 30.00)),
     ModelDefinition("gpt-5.6-terra", "openai", "GPT-5.6 Terra", (2.50, 0.25, 15.00)),
     ModelDefinition("gpt-5.6-luna", "openai", "GPT-5.6 Luna", (1.00, 0.10, 6.00)),

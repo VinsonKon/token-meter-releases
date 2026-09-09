@@ -74,7 +74,7 @@ struct Metrics {
 };
 
 struct Motion {
-  uint16_t animationFrameMs;
+  uint32_t animationFrameUs;
   uint16_t thinkingCycleMs;
   uint16_t updateDotsCycleMs;
   uint16_t chargingCycleMs;

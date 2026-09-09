@@ -2,6 +2,6 @@
 
 namespace codex_meter {
 
-constexpr char kFirmwareVersion[] = "1.1.2";
+constexpr char kFirmwareVersion[] = "1.1.4";
 
 }  // namespace codex_meter

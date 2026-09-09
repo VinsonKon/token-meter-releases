@@ -1,5 +1,6 @@
 #include "ui_theme.h"
 
+#include "frame_clock.h"
 #include "glow_9slice.h"
 #include "sofia_aa_fonts.h"
 #include "skin_runtime.h"
@@ -70,7 +71,7 @@ constexpr ui_theme::Theme kThemes[] = {
             20.0f,// cardRadius
         },
         {
-            33,    // animationFrameMs: ~30 FPS, time-based rather than frame-counted
+            frame_clock::kAnimationFrameUs, // 60 FPS target; cycle durations unchanged
             1400,  // thinkingCycleMs
             1200,  // updateDotsCycleMs
             1600,  // chargingCycleMs
