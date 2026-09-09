@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "codex-pixel-glow",
+  "name": "Codex Pixel Glow",
+  "version": "1.0.0",
+  "screen": [
+    480,
+    480
+  ]
+}

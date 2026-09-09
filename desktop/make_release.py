@@ -12,6 +12,7 @@ import re
 import shutil
 
 import release_config
+import skin_manager
 
 
 def sha256(path: Path) -> str:
@@ -57,10 +58,20 @@ def main() -> int:
     if missing:
         raise SystemExit("Missing release assets: " + ", ".join(missing))
 
+    skin_sources = [project / "skins" / name for name in (
+        "codex-classic-glow-1.0.0.meterskin",
+        "codex-pixel-glow-1.0.0.meterskin",
+    )]
+    skins = [skin_manager.load_package(path) for path in skin_sources]
+    if len({skin.id for skin in skins}) != len(skins):
+        raise SystemExit("Release skins must have independent identities")
+
     output.mkdir(parents=True, exist_ok=True)
     (output / "CodexMeterUpdater.exe").unlink(missing_ok=True)
     for name, source in sources.items():
         shutil.copy2(source, output / name)
+    for source in skin_sources:
+        shutil.copy2(source, output / source.name)
 
     manifest = {
         "schema": 1,
@@ -90,9 +101,10 @@ def main() -> int:
             ),
         },
     }
-    (output / release_config.MANIFEST_ASSET_NAME).write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+    manifest_text = json.dumps(manifest, indent=2) + "\n"
+    (output / release_config.MANIFEST_ASSET_NAME).write_text(manifest_text, encoding="utf-8")
+    # Keep the source checkout and full distribution consistent with the assets.
+    (project / release_config.MANIFEST_ASSET_NAME).write_text(manifest_text, encoding="utf-8")
     print(f"Prepared GitHub Release assets in {output}")
     return 0
 

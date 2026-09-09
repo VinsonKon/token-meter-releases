@@ -70,6 +70,7 @@ import source_registry
 import sync as meter_sync
 import release_config
 import update_manager
+import skin_manager
 
 
 APP_NAME = "CodexMeterSync"
@@ -311,6 +312,20 @@ class TrayService:
         self.firmware_update_in_progress = False
         self.firmware_update_phase = FIRMWARE_PHASE_IDLE
         self.state_dir = meter_sync.state_directory()
+        self.skin_queue = queue.Queue(maxsize=1)
+        self.skin_lock = threading.Lock()
+        self.skin_in_progress = False
+        self.skin_library = self.state_dir / "skins"
+        self.skins = {}
+        self.active_skin_sha = ""
+        self.skin_status = "设备皮肤：未读取"
+        if self.skin_library.exists():
+            for path in self.skin_library.glob("*.meterskin"):
+                try:
+                    skin = skin_manager.load_package(path)
+                    self.skins[skin.sha256] = skin
+                except (OSError, ValueError):
+                    pass
         self.log_path = sync_log_path(self.state_dir)
         try:
             prune_sync_logs(self.state_dir)
@@ -341,6 +356,7 @@ class TrayService:
             pystray.MenuItem("Sync now", self._sync_now, default=True),
             pystray.MenuItem("Device", pystray.Menu(self._device_menu_items)),
             pystray.MenuItem("AI Tool", self._source_menu()),
+            pystray.MenuItem("皮肤", pystray.Menu(self._skin_menu_items)),
         ]
         if test_build:
             menu_items.append(pystray.MenuItem(
@@ -461,9 +477,17 @@ class TrayService:
             self.bound_name = display_name
             self.discovered_devices[address] = display_name
         self.args.address = address
+        self._reset_skin_device()
         self._update_device_menu()
 
     def _device_info_updated(self, info: dict[str, object]) -> None:
+        if hasattr(self, "skin_lock"):
+            with self.skin_lock:
+                state = info.get("skin_status")
+                self.active_skin_sha = str(state.get("sha256") or "") if isinstance(state, dict) else ""
+                current = self.skins.get(self.active_skin_sha)
+                self.skin_status = "设备皮肤：" + (current.name if current else
+                    str(state.get("id") or "未读取") if isinstance(state, dict) else "未读取")
         with self.update_lock:
             self.device_info = dict(info)
         info_error = str(info.get("error") or "")
@@ -588,6 +612,7 @@ class TrayService:
             self.bound_address = None
             self.bound_name = ""
         self.args.address = None
+        self._reset_skin_device()
         self.device_change_event.set()
         self._set_status("Device forgotten; scanning for a replacement")
         self._update_device_menu()
@@ -835,6 +860,9 @@ class TrayService:
         return report
 
     def _install_client_update(self, _icon, _item) -> None:
+        if getattr(self, "skin_in_progress", False):
+            self._notify_user("请先等待皮肤传输完成")
+            return
         with self.update_lock:
             release = self.update_release
             if self.client_update_in_progress:
@@ -939,6 +967,9 @@ class TrayService:
             self._update_device_menu()
 
     def _install_firmware_update(self, _icon, _item) -> None:
+        if getattr(self, "skin_in_progress", False):
+            self._notify_user("请先等待皮肤传输完成")
+            return
         with self.update_lock:
             release = self.update_release
             info = dict(self.device_info)
@@ -1074,6 +1105,98 @@ class TrayService:
         with self.status_lock:
             return self.status[:72]
 
+    def _skin_menu_items(self):
+        with self.skin_lock:
+            busy = self.skin_in_progress
+            skins = list(self.skins.values())
+            label = self.skin_status
+            active_sha = self.active_skin_sha
+        yield pystray.MenuItem(label, None, enabled=False)
+        yield pystray.MenuItem("导入皮肤包…", self._import_skin, enabled=not busy)
+        yield pystray.MenuItem("读取设备当前皮肤", lambda _icon, _item: self._queue_skin(None, read_only=True), enabled=not busy)
+        yield pystray.MenuItem("恢复内置默认皮肤", lambda _icon, _item: self._queue_skin(None), enabled=not busy)
+        def item_for(skin):
+            def action(_icon, _item):
+                self._queue_skin(skin)
+            def checked(_item):
+                return skin.sha256 == active_sha
+            return pystray.MenuItem(f"{skin.name} {skin.version}", action, checked=checked, enabled=not busy)
+        for skin in sorted(skins, key=lambda item: (item.name, item.version, item.sha256)):
+            yield item_for(skin)
+
+    def _import_skin(self, _icon, _item):
+        with self.skin_lock:
+            if self.skin_in_progress:
+                return
+            self.skin_in_progress = True
+        def worker():
+            imported = None
+            try:
+                path = skin_manager.choose_file()
+                if path is not None:
+                    imported = skin_manager.import_package(path, self.skin_library)
+                    with self.skin_lock:
+                        self.skins[imported.sha256] = imported
+                    self._set_status(f"皮肤已导入：{imported.name}")
+            except Exception as exc:
+                error_dialog("皮肤导入失败", str(exc))
+            finally:
+                with self.skin_lock:
+                    self.skin_in_progress = False
+                self._update_device_menu()
+            if imported and confirm_dialog("应用皮肤", f"已导入 {imported.name}。现在应用到当前绑定设备吗？"):
+                self._queue_skin(imported)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reset_skin_device(self):
+        if hasattr(self, "skin_lock"):
+            with self.skin_lock:
+                self.active_skin_sha = ""
+                self.skin_status = "设备皮肤：未读取"
+        with self.update_lock:
+            self.device_info.pop("skin", None)
+
+    def _queue_skin(self, skin, read_only=False):
+        with self.update_lock:
+            updating = self.firmware_update_in_progress or self.client_update_in_progress
+            supported = self.device_info.get("skin") == 1
+        if updating:
+            error_dialog("暂时无法换肤", "请等待客户端或固件更新完成。")
+            return
+        if not self.bound_address or not supported:
+            error_dialog("需要更新设备", "请先连接设备，并安装支持 Skin v1 的固件。皮肤包已保存在客户端。")
+            return
+        address = self.bound_address
+        with self.skin_lock:
+            if self.skin_in_progress:
+                return
+            self.skin_in_progress = True
+            self.skin_status = "皮肤：等待读取" if read_only else "皮肤：等待传输"
+        def complete(result, error):
+            with self.skin_lock:
+                self.skin_in_progress = False
+                if result is not None and self.bound_address == address:
+                    self.active_skin_sha = str(result.get("sha256") or "")
+                    actual = self.skins.get(self.active_skin_sha)
+                    self.skin_status = "设备皮肤：" + (actual.name if actual else
+                        "内置默认" if result.get("id") == "builtin" else str(result.get("id") or "未读取"))
+                elif error:
+                    self.active_skin_sha = ""
+                    self.skin_status = "设备皮肤：请重新读取确认"
+            if error:
+                self._set_status(f"皮肤切换失败：{error}")
+                self._notify_user(f"皮肤切换未确认：{error}")
+            else:
+                self._set_status("已读取设备当前皮肤" if read_only else "皮肤已切换，设备已确认")
+                if not read_only:
+                    self._notify_user("皮肤已切换")
+            self._update_device_menu()
+        try:
+            self.skin_queue.put_nowait(skin_manager.SkinRequest(skin, address, complete, read_only))
+            self.sync_now_event.set()
+        except queue.Full:
+            complete(None, "已有皮肤任务等待处理")
+
     def _set_status(self, message: str) -> None:
         if message.startswith("Firmware update started:"):
             with self.update_lock:
@@ -1139,6 +1262,7 @@ class TrayService:
                         device_list_callback=self._devices_discovered,
                         binding_callback=self._binding_updated,
                         device_info_callback=self._device_info_updated,
+                        skin_queue=self.skin_queue,
                         firmware_update_queue=(
                             None if self.test_build
                             else self.firmware_update_queue
@@ -1240,6 +1364,18 @@ class TrayService:
 
 
 def main(test_build: bool = False) -> int:
+    if "--validate-skin" in sys.argv:
+        # Read-only packed-client smoke test / author utility. No tray, account,
+        # autostart, instance-lock, BLE or persistent settings side effects.
+        try:
+            index = sys.argv.index("--validate-skin")
+            skin = skin_manager.load_package(Path(sys.argv[index + 1]))
+            print(json.dumps({"id": skin.id, "version": skin.version,
+                              "bytes": len(skin.wire), "sha256": skin.sha256}))
+            return 0
+        except (IndexError, OSError, ValueError) as exc:
+            print(f"Invalid skin: {exc}")
+            return 2
     # The embedded worker is created with CREATE_NO_WINDOW by the native GUI
     # launcher. Keep this as a fallback when running the worker directly.
     hide_console_window()

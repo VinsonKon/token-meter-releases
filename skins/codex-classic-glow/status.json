@@ -1,0 +1,65 @@
+{
+  "renderer": "pill",
+  "states": {
+    "thinking": {
+      "x": 30,
+      "y": 28,
+      "width": 190,
+      "height": 36,
+      "radius": 18,
+      "textMode": 2,
+      "textInset": 40,
+      "baseline": 27,
+      "dotX": 20,
+      "dotY": 12,
+      "dotSize": 12,
+      "dots": 1,
+      "glowColor": "#6468FF"
+    },
+    "approval": {
+      "x": 30,
+      "y": 28,
+      "width": 230,
+      "height": 36,
+      "radius": 18,
+      "textMode": 1,
+      "textInset": 0,
+      "baseline": 27,
+      "dotX": 20,
+      "dotY": 12,
+      "dotSize": 0,
+      "dots": 0,
+      "glowColor": "#FF6464"
+    },
+    "stale": {
+      "x": 30,
+      "y": 28,
+      "width": 180,
+      "height": 36,
+      "radius": 18,
+      "textMode": 0,
+      "textInset": 0,
+      "baseline": 27,
+      "dotX": 20,
+      "dotY": 12,
+      "dotSize": 0,
+      "dots": 0,
+      "glowColor": "#FFB100"
+    },
+    "waiting": {
+      "x": 30,
+      "y": 28,
+      "width": 260,
+      "height": 36,
+      "radius": 18,
+      "textMode": 0,
+      "textInset": 0,
+      "baseline": 27,
+      "dotX": 20,
+      "dotY": 12,
+      "dotSize": 0,
+      "dots": 0,
+      "glowColor": "#FFB100"
+    }
+  }
+}

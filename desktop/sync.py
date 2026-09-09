@@ -25,6 +25,7 @@ import codex_account
 import model_registry
 import source_registry
 import update_manager
+import skin_manager
 
 
 DEVICE_NAME = "Codex Meter"
@@ -1931,6 +1932,7 @@ async def monitor_connection(
     update_display_queue: queue.Queue[
         update_manager.DeviceUpdateDisplayRequest
     ] | None = None,
+    skin_queue: queue.Queue[skin_manager.SkinRequest] | None = None,
 ) -> None:
     reconnect_event = reconnect_event or threading.Event()
     changed = asyncio.Event()
@@ -1953,6 +1955,38 @@ async def monitor_connection(
     cached_source = ""
     last_source_error = ""
     refresh_lock = asyncio.Lock()
+    transfer_lock = asyncio.Lock()
+
+    async def skin_worker():
+        while not stop_event.is_set() and not reconnect_event.is_set():
+            request = None
+            if skin_queue is not None:
+                with suppress(queue.Empty):
+                    request = skin_queue.get_nowait()
+            if request is None:
+                await asyncio.sleep(0.1)
+                continue
+            result, error = None, None
+            try:
+                if request.address.casefold() != address.casefold():
+                    raise skin_manager.SkinError("设备已改变，请重新选择皮肤")
+                async with transfer_lock:
+                    if request.read_only:
+                        result = await skin_manager.read_status(client)
+                    else:
+                        result = await skin_manager.transfer(client, request, status_callback,
+                            lambda: stop_event.is_set() or reconnect_event.is_set())
+            except asyncio.CancelledError:
+                error = "连接已中断；请重新连接后确认设备当前皮肤"
+                raise
+            except Exception as exc:
+                error = str(exc)
+            finally:
+                skin_queue.task_done()
+                if callable(request.complete):
+                    request.complete(result, error)
+
+    skin_task = asyncio.create_task(skin_worker())
 
     async def transmit(snapshot: dict[str, Any], *, force_send: bool = False) -> bool:
         nonlocal last_signature, next_heartbeat
@@ -2009,14 +2043,15 @@ async def monitor_connection(
                     update_display_queue.task_done()
 
             firmware_request = None
-            if firmware_update_queue is not None:
+            if firmware_update_queue is not None and not transfer_lock.locked():
                 with suppress(queue.Empty):
                     firmware_request = firmware_update_queue.get_nowait()
             if firmware_request is not None:
                 try:
-                    await update_manager.perform_ble_firmware_update(
-                        client, firmware_request, status_callback
-                    )
+                    async with transfer_lock:
+                        await update_manager.perform_ble_firmware_update(
+                            client, firmware_request, status_callback
+                        )
                 except Exception as exc:
                     _emit(
                         f"Firmware update failed: {exc}",
@@ -2183,6 +2218,9 @@ async def monitor_connection(
             except asyncio.TimeoutError:
                 pass
     finally:
+        skin_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await skin_task
         watcher.cancel()
         with suppress(asyncio.CancelledError):
             await watcher
@@ -2218,6 +2256,7 @@ async def run(
     update_display_queue: queue.Queue[
         update_manager.DeviceUpdateDisplayRequest
     ] | None = None,
+    skin_queue: queue.Queue[skin_manager.SkinRequest] | None = None,
 ) -> int:
     codex_home = Path(args.codex_home).expanduser().resolve()
     claude_home = Path(args.claude_home).expanduser().resolve()
@@ -2332,6 +2371,11 @@ async def run(
                     status_callback,
                 )
                 device_info = await update_manager.read_device_info(client)
+                if device_info.get("skin") == 1:
+                    try:
+                        device_info["skin_status"] = await skin_manager.read_status(client)
+                    except Exception as exc:
+                        device_info["skin_error"] = str(exc)
                 if device_info_callback:
                     try:
                         device_info_callback(device_info)
@@ -2346,6 +2390,7 @@ async def run(
                     test_restore_event, status_callback, device_change_event,
                     firmware_update_queue,
                     update_display_queue,
+                    skin_queue,
                 )
                 if device_change_event.is_set():
                     preferred_address = args.address

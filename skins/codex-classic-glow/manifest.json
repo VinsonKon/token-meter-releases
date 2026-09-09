@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "id": "codex-classic-glow",
+  "name": "原版呼吸 · Classic Glow",
+  "version": "1.0.0",
+  "screen": [
+    480,
+    480
+  ]
+}

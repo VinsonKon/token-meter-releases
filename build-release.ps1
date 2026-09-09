@@ -21,6 +21,20 @@ function Invoke-Checked {
     }
 }
 
+function Copy-SourceTree([string]$SourceDirectory, [string]$DestinationDirectory) {
+    $sourceFull = [IO.Path]::GetFullPath($SourceDirectory)
+    New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $sourceFull -Recurse -File -Force) {
+        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Source links are not packaged' }
+        $relative = $file.FullName.Substring($sourceFull.Length + 1)
+        if (($relative -split '\\') -contains '__pycache__' -or ($relative -split '\\') -contains '.pytest_cache' -or
+            $file.Extension -in '.pyc', '.pyo', '.skinbin') { continue }
+        $target = Join-Path $DestinationDirectory $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $target
+    }
+}
+
 if (-not $SkipFirmware) {
     $pio = Get-Command pio -ErrorAction SilentlyContinue
     if (-not $pio) {
@@ -73,10 +87,14 @@ Invoke-Checked $python (Join-Path $desktop "make_release.py")
 
 $packageRoot = Join-Path $root "release-package"
 $packageRootFull = [System.IO.Path]::GetFullPath($packageRoot)
-if (-not $packageRootFull.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not $packageRootFull.StartsWith(($root.TrimEnd('\') + '\'), [System.StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path -Leaf $packageRootFull) -ne 'release-package') {
     throw "Unsafe package staging path: $packageRootFull"
 }
 if (Test-Path -LiteralPath $packageRootFull) {
+    if ((Get-Item -LiteralPath $packageRootFull -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Package staging must not be a junction or symlink'
+    }
     Remove-Item -LiteralPath $packageRootFull -Recurse -Force
 }
 New-Item -ItemType Directory -Path $packageRootFull | Out-Null
@@ -94,7 +112,9 @@ $rootFiles = @(
     "flash-firmware.cmd",
     "flash-firmware.ps1",
     "start-sync.cmd",
-    "build-release.ps1"
+    "build-release.ps1",
+    "SKINS.md",
+    "update.json"
 )
 foreach ($name in $rootFiles) {
     Copy-Item -LiteralPath (Join-Path $root $name) -Destination $packageRootFull -Force
@@ -107,19 +127,37 @@ Get-ChildItem -LiteralPath $desktop -File | Where-Object {
 } | Copy-Item -Destination $desktopPackage -Force
 $desktopAssets = Join-Path $desktop "assets"
 if (Test-Path -LiteralPath $desktopAssets -PathType Container) {
-    Copy-Item -LiteralPath $desktopAssets -Destination $desktopPackage -Recurse
+    Copy-SourceTree $desktopAssets (Join-Path $desktopPackage 'assets')
 }
+Copy-SourceTree (Join-Path $desktop 'tests') (Join-Path $desktopPackage 'tests')
 
 $firmwarePackage = Join-Path $packageRootFull "firmware"
 New-Item -ItemType Directory -Path $firmwarePackage | Out-Null
 Copy-Item -LiteralPath (Join-Path $firmware "platformio.ini") -Destination $firmwarePackage
 Copy-Item -LiteralPath (Join-Path $firmware "build_config.py") -Destination $firmwarePackage
 Copy-Item -LiteralPath (Join-Path $firmware "partitions_ota_16mb.csv") -Destination $firmwarePackage
-Copy-Item -LiteralPath (Join-Path $firmware "include") -Destination $firmwarePackage -Recurse
-Copy-Item -LiteralPath (Join-Path $firmware "src") -Destination $firmwarePackage -Recurse
+foreach ($directory in @('include', 'src', 'assets', 'tests')) {
+    Copy-SourceTree (Join-Path $firmware $directory) (Join-Path $firmwarePackage $directory)
+}
+foreach ($directory in @('tools', 'skins')) {
+    Copy-SourceTree (Join-Path $root $directory) (Join-Path $packageRootFull $directory)
+}
+
+# Generated binaries/caches are not skin sources or distribution content.
+Get-ChildItem -LiteralPath $packageRootFull -Recurse -File -Force | Where-Object {
+    $_.Extension -in '.pyc', '.pyo', '.skinbin'
+} | ForEach-Object {
+    $generatedFile = [IO.Path]::GetFullPath($_.FullName)
+    if (-not $generatedFile.StartsWith(($packageRootFull + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Generated file is outside package staging: $generatedFile"
+    }
+    Remove-Item -LiteralPath $generatedFile -Force
+}
 
 $zip = Join-Path $root "codex-token-monitor.zip"
 Compress-Archive -Path (Join-Path $packageRootFull "*") -DestinationPath $zip -Force
+Copy-Item -LiteralPath $zip -Destination (Join-Path $root 'github-release\codex-token-monitor.zip') -Force
+Invoke-Checked $python (Join-Path $root 'tools\verify-release.py') '--write-checksums'
 Write-Host "Version: $((Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim())"
 Write-Host "GitHub assets: $(Join-Path $root 'github-release')"
 Write-Host "Unversioned package: $zip"

@@ -1,6 +1,30 @@
 # Codex Token Monitor for Waveshare AMOLED 2.16
 
-## Version 1.0.9
+## Version 1.1.2 — 独立皮肤包与运行时切换
+
+客户端与固件统一为 **1.1.2**。先更新客户端，再通过 `Updates` 更新设备固件；
+之后右键通知区域图标 → **皮肤 → 导入皮肤包…**，即可导入和切换，无需每次刷固件。
+
+- `codex-classic-glow-1.0.0.meterskin`：原版完整圆角胶囊、文字/圆点呼吸和外围光晕。Thinking 与审批呼吸；Stale / Waiting 按原版保持静态。
+- `codex-pixel-glow-1.0.0.meterskin`：当前像素版，Thinking 为 1.5 秒循环和黄绿蓝渐变，审批为 `#FF6B6B`，Stale 为 `#E6AC38`，Stale / Waiting 无底板。
+- 两个包均独立包含布局、配色和四个状态的表现数据；可编辑源文件分别在 `skins/` 下。包版本与软件版本独立。
+- 新导入皮肤最大 384 KiB，传输失败保留当前选择，换肤不改变审批优先级或 Token 统计。
+- 验证：132 项客户端测试、固件解析/动画/存储主机测试，以及实机双皮肤四状态切换、中断保护和真实同步恢复通过。新原版包的真实断电保留和原生菜单鼠标点击尚未验证。
+
+Release 附件包括客户端、OTA / factory 固件、更新清单、两个独立皮肤包、完整 ZIP 和 SHA-256 校验清单。
+
+### Runtime skin format
+
+The client can import declarative `.meterskin` packages and transfer them to
+skin-capable firmware without reflashing for each skin change. Two independent
+packages are provided: Classic Glow (Skin v2; requires client/firmware 1.1.2)
+and Pixel Glow (unchanged Skin v1). Dashboard layout, theme colors and all four
+status presentations live in each package. Classic Stale/Waiting remain static,
+matching the pre-pixel UI; the pixel package animates all four states.
+System navigation and update controls remain firmware-owned. See [SKINS.md](SKINS.md)
+for supported fields, both packages, safety boundaries and testing instructions.
+
+## Dashboard and device UI
 
 ### Figma update states and single-quota layout
 
@@ -15,10 +39,10 @@
 
 ### Display, settings and input
 
-- Typography follows the Figma weights: Sofia Pro Medium for brand/metadata/cost, Bold for status, quota cards, settings and BACK, and Black for the primary token total.
+- Typography uses Sofia Pro Medium for brand/metadata/cost and the enlarged status labels, Bold for quota cards, settings and BACK, and Black for the primary token total.
 - The ChatGPT, brightness, volume, battery and charging icons are generated from the exact Figma SVG paths into 4-bit antialiased coverage masks.
-- THINKING keeps the dashboard visible and pulses the complete bottom activity indicator between 0.3 and 1.0 opacity.
-- `NEED APPROVAL` uses the 230×36 red status card from Figma. A quota with less than 10% remaining independently switches its own card to the revised `LIMIT REACHED` treatment; exactly 10% remains normal.
+- THINKING keeps the dashboard visible and plays the supplied GIF's turning pixel block, cropped to the icon only, recolored with an independent yellow-green-blue loop. Stale data uses the reference video's breathing solid square in gold; waiting for sync uses a flowing blue ring.
+- `NEED APPROVAL` uses a warm-red breathing pixel glyph and an immediately readable, centered label. It takes priority over thinking and stale data. A quota with less than 10% remaining independently switches its own card to the revised `LIMIT REACHED` treatment; exactly 10% remains normal.
 - The cost prefix uses Sofia Pro Medium 26 for `RMB`; the 32 px amount shares the same baseline so both parts align at the bottom.
 - The latest header battery is a 36×36 SVG outline with an antialiased dynamic fill; low battery uses the separate red/white warning layers from Figma.
 - Charging is independent from AI task/update states and uses a 1.6-second left-to-right fill loop, so it can animate at the same time as THINKING.
@@ -51,6 +75,7 @@
 - `Device`：扫描、选择或解除绑定 Codex Meter；
 - `AI Tool`：选择 `Auto`、`Codex` 或 `Claude Code` 数据源；
 - `Updates`：检查并安装正式版客户端更新或设备固件 OTA；
+- `皮肤`：导入独立 `.meterskin` 包、选择已导入皮肤、读取设备当前选择或恢复内置默认；
 - `Start with Windows`：开启或关闭当前用户的开机自动运行，无需管理员权限；
 - `Open log`：打开当天的 `%APPDATA%\CodexMeter\sync-YYYY-MM-DD.log`；同步器每天新建文件，并只保留今天和前一天两个日志；
 - `Exit`：断开 BLE 并退出。
@@ -287,8 +312,8 @@ CNY = USD × USD/CNY
 设备界面已经按最新 Figma 文件实现，使用 Sofia Pro 4-bit 抗锯齿字形，并只显示英文。70 px 蓝色顶部栏包含 `Codex`、月卡档位与 SVG 电池状态；配额卡片采用右对齐百分比、`5H`/`WEEK` 标签及内联重置时间。包含：
 
 - 空闲默认态（无底部状态文字）；
-- 任务运行态（蓝点与 `THINKING...`）；
-- 等待权限批准态（红色 `NEED APPROVAL` 状态卡）；
+- 任务运行态（像素形变、渐变柔光与 `THINKING`）；
+- 等待权限批准态（暖红像素呼吸与居中的 `NEED APPROVAL`，即时抢占其他任务状态）；
 - 自定义状态提示；
 - 额度低于 10% 的告警态（只有对应卡片变红并保留实际百分比）；
 - 低电量态（电池旁显示警告三角形）；
@@ -296,7 +321,25 @@ CNY = USD × USD/CNY
 - 更新可用、下载、安装、校验、重启、失败和回滚状态；
 - 缺少 5H 额度时的单额度布局。
 
-渲染使用 480×480 PSRAM 双缓冲：界面先在离屏帧中完整绘制，再一次提交到 AMOLED，避免逐项重绘造成的黑屏闪烁。字体与 SVG 图标覆盖率以 4-bit 灰度保存，并透明混合到 RGB565 背景，不再使用有明显锯齿的 1-bit 字形。额度进度条的胶囊端点也由设备端进行 4-bit 覆盖率混合。常规倒计时刷新周期为 10 秒，收到新 BLE 数据时立即刷新；当日所有模型 token 总数变化时，使用非阻塞的 1.5 秒 `easeOutQuart` 连续数字滚动动画，首次启动与数值未变化时不播放。`THINKING...` 使用连续余弦呼吸，让底部圆点和完整文字在 0.3–1.0 透明度间平滑变化；安装、校验和重启状态的三个省略号使用共享的 1.2 秒错相循环。状态与 token 动画均以约 25 FPS 独立更新，并只传输需要变化的局部矩形；旋转画面时局部区域会同步映射。
+渲染使用 480×480 PSRAM 双缓冲：界面先在离屏帧中完整绘制，再一次提交到 AMOLED，避免逐项重绘造成的黑屏闪烁。字体与 SVG 图标覆盖率以 4-bit 灰度保存，并透明混合到 RGB565 背景，不再使用有明显锯齿的 1-bit 字形。额度进度条的胶囊端点也由设备端进行 4-bit 覆盖率混合。常规倒计时刷新周期为 10 秒，收到新 BLE 数据时立即刷新；当日所有模型 token 总数变化时，使用非阻塞的 1.5 秒 `easeOutQuart` 连续数字滚动动画，首次启动与数值未变化时不播放。安装、校验和重启状态的三个省略号使用共享的 1.2 秒错相循环。状态与 token 动画按 33ms 目标节拍（约 30 FPS，非设备实测帧率）独立更新，并只传输需要变化的局部矩形；旋转画面时局部区域会同步映射。
+
+左上状态图标由 `firmware/include/status_pixel.h` 绘制，64×64 光晕区域内的主体约 36 像素。状态标签高 44 像素，普通状态使用 32 号字，较长的等待同步使用 28 号字，四个内置标签均完整显示。`THINKING` 从用户 GIF 中截取第 45–85 帧（0-based、终点 86 不包含）的同向完整形变周期，移除不能循环的实心方块入场和残尾，而不是强行把原末帧淡化回首帧。41 帧使用直接寻址的 8-bit 亮度资产及相邻帧插值，将所选 3.23 秒周期按 323/150 倍速压缩至每轮精确 1.5 秒，累计帧时间四舍五入，不倒放或重复端点。绘制使用预计算调色表和整数混色，独立使用 12 秒的黄色→绿色→蓝色→黄色平滑循环，颜色不会在形状循环回到首帧时重置。
+
+`NEED APPROVAL` 的动作来自用户视频 14.9–18.3 秒片段内的稳定循环：方环→四角→中心点→十字，每轮 700ms。按源视频实际帧时间读取三个稳定周期，平均成 35 组、每组 20ms 的角格／边格／中心格亮度样本并连续插值；不复制该片段前后的文字转场及变蓝阶段。保持待批准的固定暖红色、独立 3.2 秒外光呼吸和清晰文案，避免把整条胶囊的呼吸也改为快速闪动；审批优先级不变。进入、解除审批和显示过期警告都立即生效。普通工作状态入场使用 240ms 宽度缓动、淡入与轻微位移，重复同步不重置动画。
+
+`DATA STALE` 使用用户视频 11.7–14.9 秒 Reading file 的实心方块呼吸：每轮 1.2 秒，按稳定段提取 60 组、每组 20ms 的亮度样本并连续插值。36 像素主体是一整块无九宫格分隔的方形，光晕与主体同步变亮、渐暗到近黑，不旋转或缩放；DATA STALE 文案与标签始终可见，图标、胶囊和文字仍使用 Thinking 黄色阶段的金黄色，不带入原片文字转场或变粉阶段。`WAITING FOR SYNC` 为 3.2 秒蓝色环形亮点流动；idle 恢复品牌。整个状态区的局部刷新限制在左上 368×98，避开电池和 TODAY TOKENS；休眠或更新界面不播放状态动画。只把参考动画用于已有状态，不新增或推测 Reading file、Responding 等额外状态。
+
+布局稳定且胶囊背景像素未变化时，只恢复、绘制和提交 64×64 图标区域；相比完整状态区，这些帧的传输字节数减少 88.6%。`status_tile.h` 保存不含旧图标或文字的背景，图标重画后仅补绘与区域相交的文字，避免光晕拖影、字边累积加粗。胶囊颜色或呼吸强度导致背景变化时仍完整刷新状态区，保留原有变色和呼吸。状态切换、布局变化、完整画面重绘、旋转、切页、休眠和更新覆盖层会重建缓存。圆角矩形只在四角计算抗锯齿距离，减少整条标签的重复浮点开销。
+
+参考 GIF 保存在 `firmware/assets/thinking-reference.gif`。可通过 `desktop\.venv\Scripts\python.exe tools\build-thinking-reference.py` 重建 `firmware/include/thinking_reference.h`；固件直接从 Flash 读取帧，不在设备上解码 GIF 或为动画动态分配内存。待批准的测量样本、源视频 SHA-256 和采样位置保存在 `firmware/assets/approval-motion.json`，通过 `desktop\.venv\Scripts\python.exe tools\build-approval-motion.py` 重建 `firmware/include/approval_reference.h`。DATA STALE 的 Reading file 呼吸样本保存在 `firmware/assets/reading-motion.json`，通过 `desktop\.venv\Scripts\python.exe tools\build-reading-motion.py` 重建 `firmware/include/reading_reference.h`。这些是源视频观测亮度驱动的动画重建，不是对原视频透明度或光晕的逐像素恢复。
+
+Windows 上可用已安装的 Visual Studio C++ 工具运行核心回归测试：
+
+```powershell
+.\tools\test-status-pixel.ps1 -SkipPreview
+```
+
+去掉 `-SkipPreview` 并传入 `-FfmpegPath` 可生成调用同一 C++ 图标渲染核心的 MP4／GIF 预览。此预览用于检查形变和柔光，不代表设备实际帧率或完整界面实录。
 
 主题不再散落在渲染代码中。`ui_theme::Theme` 同时描述 `Colors`、`Typography`、
 `Assets`、`Metrics` 与 `Motion`，`renderer.cpp` 只读取 `ui_theme::active()`。

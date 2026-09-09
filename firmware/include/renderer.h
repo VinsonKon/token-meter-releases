@@ -17,6 +17,7 @@ enum class Page : uint8_t {
 };
 
 bool begin();
+void skinChanged();
 
 void setPage(Page page);
 Page page();
@@ -30,11 +31,24 @@ void sleepDisplay();
 void wakeDisplay();
 bool displaySleeping();
 
+// Read-only diagnostic window for the current status animation. Render time
+// includes panel submission; fps is scheduler throughput, not optical capture.
+struct StatusRenderStats {
+  uint32_t state = 0;
+  uint32_t frames = 0;
+  uint32_t averageUs = 0;
+  uint32_t maximumUs = 0;
+  uint32_t overBudget = 0;
+  uint32_t fpsTenths = 0;
+};
+StatusRenderStats statusRenderStats();
+
 void render(const codex_meter::CodexPacket* snapshot, bool fresh,
             bool bleConnected, int batteryPercent, bool batteryCharging,
             uint32_t receivedAtMs);
 bool tokenAnimationActive();
 bool updateAnimationActive();
+bool statusAnimationActive(const codex_meter::CodexPacket* snapshot, bool fresh);
 void renderTokenAnimationFrame();
 void renderUpdateAnimationFrame();
 void renderStatusAnimationFrame(const codex_meter::CodexPacket* snapshot,

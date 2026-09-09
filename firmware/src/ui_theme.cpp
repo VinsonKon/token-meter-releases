@@ -2,6 +2,7 @@
 
 #include "glow_9slice.h"
 #include "sofia_aa_fonts.h"
+#include "skin_runtime.h"
 
 namespace {
 
@@ -57,9 +58,9 @@ constexpr ui_theme::Theme kThemes[] = {
         {&StatusGlow36, &ProgressGlow20},
         {
             30,   // pageMargin
-            28,   // statusY
-            36,   // statusHeight
-            18.0f,// statusRadius
+            24,   // statusY: retain the header center at y=46
+            44,   // statusHeight: larger glyph body and labels
+            8.0f, // statusRadius: approved compact text-only backplate
             40,   // progressX
             400,  // progressWidth
             20,   // progressHeight
@@ -69,7 +70,7 @@ constexpr ui_theme::Theme kThemes[] = {
             20.0f,// cardRadius
         },
         {
-            40,    // animationFrameMs
+            33,    // animationFrameMs: ~30 FPS, time-based rather than frame-counted
             1400,  // thinkingCycleMs
             1200,  // updateDotsCycleMs
             1600,  // chargingCycleMs
@@ -94,6 +95,34 @@ ui_theme::Id currentTheme = ui_theme::Id::CodexDark;
 namespace ui_theme {
 
 const Theme& active() {
+  if (skin::imported()) {
+    static Theme importedTheme;
+    static uint32_t importedRevision = UINT32_MAX;
+    if (importedRevision != skin::revision()) {
+      importedTheme = kThemes[0];
+      const auto* skinHeader = skin::active();
+      importedTheme.key = skinHeader->id;
+      static_assert(sizeof(Colors) == 25 * sizeof(uint16_t), "skin color ABI");
+      uint16_t colors[25];
+      for (int i = 0; i < 25; ++i) {
+        const uint32_t c = skinHeader->colors[i];
+        colors[i] = rgb565(c >> 16, (c >> 8) & 255, c & 255);
+      }
+      memcpy(&importedTheme.colors, colors, sizeof(colors));
+      using namespace skin_format;
+      auto& m = importedTheme.metrics;
+      m.statusY = skin::layout(StatusY);
+      m.statusRadius = skin::layout(StatusRadius);
+      m.cardX = skin::layout(CardX); m.cardWidth = skin::layout(CardWidth);
+      m.cardRadius = skin::layout(CardRadius);
+      m.progressX = m.cardX + skin::layout(ProgressInset);
+      m.progressWidth = m.cardWidth - 2 * skin::layout(ProgressInset);
+      m.progressHeight = skin::layout(ProgressHeight);
+      m.progressRadius = skin::layout(ProgressRadius);
+      importedRevision = skin::revision();
+    }
+    return importedTheme;
+  }
   return kThemes[static_cast<uint8_t>(currentTheme)];
 }
 

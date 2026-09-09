@@ -17,6 +17,7 @@
 #include "firmware_version.h"
 #include "renderer.h"
 #include "ui_theme.h"
+#include "skin_runtime.h"
 
 using codex_meter::CodexPacket;
 namespace {
@@ -177,13 +178,17 @@ void refreshDeviceInfo() {
   if (!deviceInfoCharacteristic) return;
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
-  char payload[192] = {};
-  snprintf(payload, sizeof(payload),
-           "{\"version\":\"%s\",\"protocol\":%u,\"ota\":%s,"
-           "\"board\":\"%s\",\"slot\":\"%s\"}",
+  const auto stats = ui::statusRenderStats();
+  char payload[384] = {};
+  const int written = snprintf(payload, sizeof(payload),
+           "{\"version\":\"%s\",\"protocol\":%u,\"skin\":1,\"ota\":%s,"
+           "\"board\":\"%s\",\"slot\":\"%s\","
+           "\"ui\":{\"state\":%u,\"frames\":%u,\"avg_us\":%u,\"max_us\":%u,\"over33\":%u,\"fps10\":%u}}",
            codex_meter::kFirmwareVersion, codex_meter::kProtocolVersion,
            next ? "true" : "false", codex_meter::kBoardId,
-           running ? running->label : "");
+           running ? running->label : "", stats.state, stats.frames,
+           stats.averageUs, stats.maximumUs, stats.overBudget, stats.fpsTenths);
+  if (written < 0 || static_cast<size_t>(written) >= sizeof(payload)) return;
   deviceInfoCharacteristic->setValue(
       reinterpret_cast<uint8_t*>(payload), strlen(payload));
 }
@@ -218,6 +223,10 @@ void confirmRunningFirmware() {
 
 bool beginOta(uint32_t size, const char* sha256, const char* version,
               const char* board) {
+  if (skin::busy()) {
+    notifyOtaStatus("error", "skin transfer in progress");
+    return false;
+  }
   if (!board || strcmp(board, codex_meter::kBoardId) != 0) {
     notifyOtaStatus("error", "wrong board");
     return false;
@@ -468,6 +477,10 @@ class ServerCallbacks final : public BLEServerCallbacks {
   }
 };
 
+class DeviceInfoCallbacks final : public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic*) override { refreshDeviceInfo(); }
+};
+
 class DataCallbacks final : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* characteristic) override {
     if (otaActive) return;
@@ -605,7 +618,7 @@ void initBle() {
   static ServerCallbacks serverCallbacks;
   server->setCallbacks(&serverCallbacks);
   server->advertiseOnDisconnect(true);
-  BLEService* service = server->createService(codex_meter::kServiceUuid);
+  BLEService* service = server->createService(BLEUUID(codex_meter::kServiceUuid), 48);
   BLECharacteristic* data = service->createCharacteristic(
       codex_meter::kDataCharacteristicUuid,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
@@ -620,6 +633,8 @@ void initBle() {
   deviceInfoCharacteristic = service->createCharacteristic(
       codex_meter::kDeviceInfoCharacteristicUuid,
       BLECharacteristic::PROPERTY_READ);
+  static DeviceInfoCallbacks deviceInfoCallbacks;
+  deviceInfoCharacteristic->setCallbacks(&deviceInfoCallbacks);
   refreshDeviceInfo();
 
   BLECharacteristic* otaControl = service->createCharacteristic(
@@ -638,6 +653,7 @@ void initBle() {
       codex_meter::kOtaStatusCharacteristicUuid,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   otaStatusCharacteristic->setValue("{\"state\":\"idle\"}");
+  skin::attachBle(service);
   service->start();
 
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
@@ -977,6 +993,7 @@ void setup() {
 
   preferences.begin("codex-meter", false);
   readPacketFromNvs();
+  skin::begin();
   logHeap("NVS");
   initPower();
   logHeap("power init");
@@ -996,6 +1013,10 @@ void setup() {
 
 void loop() {
   updateOtaUiTasks();
+  if (skin::poll(bleConnected, otaActive || otaRebootAtMs != 0)) {
+    ui::skinChanged();
+    renderNow();
+  }
   const bool displayTestActive = hasSnapshot &&
       snapshot.test_state != codex_meter::kTestNone;
   if (otaActive ||
@@ -1071,16 +1092,8 @@ void loop() {
     delay(20);
     return;
   }
-  const bool approvalPending = hasSnapshot &&
-      (snapshot.needs_approval ||
-       strcmp(snapshot.status, "need approval") == 0 ||
-       strcmp(snapshot.status, "needs approval") == 0 ||
-       snapshot.test_state == codex_meter::kTestNeedApproval);
-  const bool thinking = hasSnapshot && snapshotIsFresh &&
-      (strcmp(snapshot.status, "thinking") == 0 ||
-       snapshot.test_state == codex_meter::kTestThinking);
-  const bool animateStatus = ui::page() == ui::Page::Dashboard &&
-      (approvalPending || thinking);
+  const bool animateStatus = ui::statusAnimationActive(
+      hasSnapshot ? &snapshot : nullptr, snapshotIsFresh);
   const bool animateTokens = ui::tokenAnimationActive();
   int animatedBatteryPercent = batteryPercent;
   bool animatedBatteryCharging = batteryCharging;
@@ -1104,7 +1117,8 @@ void loop() {
     if (animateTokens) ui::renderTokenAnimationFrame();
     if (animateUpdate) ui::renderUpdateAnimationFrame();
     if (animateStatus) {
-      ui::renderStatusAnimationFrame(&snapshot, snapshotIsFresh);
+      ui::renderStatusAnimationFrame(
+          hasSnapshot ? &snapshot : nullptr, snapshotIsFresh);
     }
     if (animateBattery) {
       ui::renderBatteryAnimationFrame(
@@ -1113,5 +1127,7 @@ void loop() {
     }
     if (!animateUi) renderNow();
   }
-  delay(10);
+  // Finer scheduling while an animation is active avoids rounding the 33ms
+  // target up to the old 10ms polling grid; still yield to BLE/FreeRTOS.
+  delay(animateUi ? 1 : 10);
 }

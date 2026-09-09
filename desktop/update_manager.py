@@ -661,7 +661,7 @@ async def read_device_info(
             info = json.loads(bytes(raw).decode("utf-8"))
             if not isinstance(info, dict):
                 raise ValueError("device info is not an object")
-            return {
+            result = {
                 "version": str(info.get("version") or ""),
                 "protocol": int(info.get("protocol") or 0),
                 "ota": bool(info.get("ota")),
@@ -669,6 +669,9 @@ async def read_device_info(
                 "slot": str(info.get("slot") or ""),
                 "legacy": False,
             }
+            if type(info.get("skin")) is int and info["skin"] == 1:
+                result["skin"] = 1
+            return result
         except Exception as exc:
             last_error = str(exc) or type(exc).__name__
             if attempt + 1 < max(1, attempts) and retry_delay > 0:

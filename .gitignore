@@ -1,5 +1,6 @@
 # Python environments and caches
 __pycache__/
+.pytest_cache/
 *.py[cod]
 .venv/
 .venv-*/
@@ -20,6 +21,7 @@ desktop/dist*/
 /*.zip
 /*.bak
 /.release-build-*.log
+/skins/*.skinbin
 
 # Local account, pairing, and runtime state
 .codex-account.json

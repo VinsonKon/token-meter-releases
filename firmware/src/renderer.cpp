@@ -9,8 +9,15 @@
 #include "board_config.h"
 #include "glow_9slice.h"
 #include "sofia_aa_fonts.h"
+#include "sofia_bold28.h"
+#include "status_label.h"
+#include "status_motion.h"
+#include "status_pixel.h"
+#include "status_tile.h"
 #include "svg_icons.h"
 #include "ui_theme.h"
+#include "skin_runtime.h"
+#include "skin_pill.h"
 
 namespace {
 
@@ -41,6 +48,23 @@ String currentUpdateStatus;
 uint8_t currentUpdateProgress = 0;
 String currentProviderId = "openai";
 String currentPlanLabel;
+status_motion::Transition statusTransition;
+String currentStatusLabel;
+uint32_t statusLoopStartedMs = 0;
+bool statusTransitionNeedsFrame = false;
+status_tile::Background statusBackground;
+status_tile::Backdrop cachedStatusBackdrop;
+status_label::Backplate statusBackplate;
+status_label::Look cachedStatusLight = {};
+int16_t cachedStatusRight = 0;
+status_motion::State cachedStatusState = status_motion::State::Idle;
+status_pixel::Mode cachedIconMode = status_pixel::Mode::Thinking;
+const ui_theme::Theme* cachedStatusTheme = nullptr;
+const AA4Font* cachedStatusFont = nullptr;
+int16_t cachedStatusTextX = 0;
+int16_t cachedStatusBaseline = 0;
+uint16_t cachedStatusForeground = 0;
+static_assert(status_tile::kSize == status_pixel::kSize, "status cache size mismatch");
 
 // SofiaMedium24 uppercase pixels for the dashboard label occupy y=98..114
 // at this baseline. Keep every independently refreshed animation rectangle
@@ -48,6 +72,50 @@ String currentPlanLabel;
 constexpr int16_t kTotalTokensBaseline = 115;
 constexpr int16_t kTodayTokensGlyphTop = 98;
 constexpr int16_t kTodayTokensGlyphBottomExclusive = 115;
+// Includes glyph glow and the longest status pill, but never the independently
+// refreshed battery or the TODAY TOKENS label.
+constexpr int16_t kStatusRegionWidth = 368;
+constexpr int16_t kStatusRightPadding = 12;
+portMUX_TYPE statusStatsMux = portMUX_INITIALIZER_UNLOCKED;
+ui::StatusRenderStats statusStats = {};
+uint64_t statusTotalUs = 0;
+uint32_t statusFirstFrameMs = 0;
+uint32_t statusLastFrameMs = 0;
+uint8_t statusStatsState = 255;
+class StatusFrameTimer {
+ public:
+  explicit StatusFrameTimer(status_motion::State state)
+      : state_(static_cast<uint8_t>(state)), started_(micros()) {}
+  ~StatusFrameTimer() {
+    const uint32_t elapsed = micros() - started_;
+    const uint32_t now = millis();
+    portENTER_CRITICAL(&statusStatsMux);
+    if (statusStatsState != state_) {
+      statusStats = {};
+      statusStats.state = state_;
+      statusStatsState = state_;
+      statusTotalUs = 0;
+      statusFirstFrameMs = now;
+    }
+    ++statusStats.frames;
+    statusTotalUs += elapsed;
+    statusStats.averageUs = statusTotalUs / statusStats.frames;
+    if (elapsed > statusStats.maximumUs) statusStats.maximumUs = elapsed;
+    if (elapsed > 33000) ++statusStats.overBudget;
+    statusLastFrameMs = now;
+    const uint32_t duration = statusLastFrameMs - statusFirstFrameMs;
+    statusStats.fpsTenths = duration
+        ? static_cast<uint32_t>(uint64_t(statusStats.frames - 1) * 10000 / duration) : 0;
+    portEXIT_CRITICAL(&statusStatsMux);
+  }
+ private:
+  uint8_t state_;
+  uint32_t started_;
+};
+static_assert(kStatusRegionWidth < 370, "status must not erase battery pixels");
+static_assert(kStatusRegionWidth * kTodayTokensGlyphTop <=
+                  kPartialFramebufferPixels,
+              "status animation must fit the partial framebuffer");
 
 constexpr bool useSingleQuotaLayout(bool primaryValid,
                                     bool secondaryValid) {
@@ -214,11 +282,19 @@ float roundedRectDistance(float px, float py, float x, float y,
 void fillAARoundedRect(int16_t x, int16_t y, int16_t width, int16_t height,
                        float radius, uint16_t color) {
   if (width <= 0 || height <= 0) return;
+  radius = fminf(radius, fminf(width, height) * 0.5f);
   uint16_t* framebuffer = canvas->getFramebuffer();
   for (int16_t py = max<int16_t>(0, y);
        py < min<int16_t>(LCD_HEIGHT, y + height); ++py) {
     for (int16_t px = max<int16_t>(0, x);
          px < min<int16_t>(LCD_WIDTH, x + width); ++px) {
+      // Only the four corners need a signed-distance/square-root test.
+      // Every pixel in either central strip has full coverage already.
+      if ((px + 0.5f >= x + radius && px + 0.5f <= x + width - radius) ||
+          (py + 0.5f >= y + radius && py + 0.5f <= y + height - radius)) {
+        framebufferPixel(framebuffer, px, py) = color;
+        continue;
+      }
       const float distance = roundedRectDistance(
           px + 0.5f, py + 0.5f, x, y, width, height, radius);
       const float coverage = 0.5f - distance;
@@ -334,7 +410,8 @@ AA4Glyph readGlyph(const AA4Font* font, char value, AA4Font* localFont = nullptr
 }
 
 void drawText(const String& text, int16_t x, int16_t baseline,
-              uint16_t color, const AA4Font* font) {
+              uint16_t color, const AA4Font* font,
+              const status_tile::Rect* clip = nullptr) {
   AA4Font loadedFont;
   memcpy_P(&loadedFont, font, sizeof(loadedFont));
   uint16_t* framebuffer = canvas->getFramebuffer();
@@ -342,6 +419,13 @@ void drawText(const String& text, int16_t x, int16_t baseline,
 
   for (size_t charIndex = 0; charIndex < text.length(); ++charIndex) {
     const AA4Glyph glyph = readGlyph(font, text[charIndex], &loadedFont);
+    if (clip && (cursorX + glyph.xOffset >= clip->x + clip->width ||
+                 cursorX + glyph.xOffset + glyph.width <= clip->x ||
+                 baseline + glyph.yOffset >= clip->y + clip->height ||
+                 baseline + glyph.yOffset + glyph.height <= clip->y)) {
+      cursorX += glyph.xAdvance;
+      continue;
+    }
     const uint32_t pixelCount = static_cast<uint32_t>(glyph.width) * glyph.height;
     for (uint32_t pixel = 0; pixel < pixelCount; ++pixel) {
       const uint8_t packed = pgm_read_byte(
@@ -351,6 +435,7 @@ void drawText(const String& text, int16_t x, int16_t baseline,
       const int16_t dx = cursorX + glyph.xOffset + (pixel % glyph.width);
       const int16_t dy = baseline + glyph.yOffset + (pixel / glyph.width);
       if (dx < 0 || dx >= LCD_WIDTH || dy < 0 || dy >= LCD_HEIGHT) continue;
+      if (clip && !clip->contains(dx, dy)) continue;
       uint16_t& target = framebufferPixel(framebuffer, dx, dy);
       target = blend565(target, color, alpha);
     }
@@ -390,7 +475,7 @@ uint16_t textWidth(const String& text, const AA4Font* font) {
 
 void drawTextCenteredInRect(const String& text, int16_t x, int16_t y,
                             int16_t width, int16_t height, uint16_t color,
-                            const AA4Font* font) {
+                            const AA4Font* font, bool cacheStatusPlacement = false) {
   AA4Font loadedFont;
   memcpy_P(&loadedFont, font, sizeof(loadedFont));
   int16_t cursorX = 0;
@@ -424,6 +509,12 @@ void drawTextCenteredInRect(const String& text, int16_t x, int16_t y,
   if (!hasInk) return;
   const int16_t drawX = x + (width - (right - left)) / 2 - left;
   const int16_t baseline = y + (height - (bottom - top)) / 2 - top;
+  if (cacheStatusPlacement) {
+    cachedStatusTextX = drawX;
+    cachedStatusBaseline = baseline;
+    cachedStatusForeground = color;
+    cachedStatusFont = font;
+  }
   drawText(text, drawX, baseline, color, font);
 }
 
@@ -505,9 +596,10 @@ void drawCost(const codex_meter::CodexPacket* packet) {
     if (cents % 100 < 10) amount += '0';
     amount += String(cents % 100);
   }
-  constexpr int16_t baseline = 222;
-  drawText("RMB", 30, baseline, theme().colors.secondaryText, theme().type.body26);
-  drawText(amount, 30 + textWidth("RMB", theme().type.body26) + 6, baseline,
+  const int16_t baseline = skin::layout(skin_format::CostBaseline);
+  const int16_t costX = skin::layout(skin_format::CostX);
+  drawText("RMB", costX, baseline, theme().colors.secondaryText, theme().type.body26);
+  drawText(amount, costX + textWidth("RMB", theme().type.body26) + 6, baseline,
            theme().colors.secondaryText, theme().type.body32);
 }
 
@@ -627,18 +719,19 @@ void drawCard(int16_t y, const char* fallbackLabel,
   const String label = valid ? windowLabel(window.window_minutes) : fallbackLabel;
   const uint16_t labelColor = exhausted ? theme().colors.exhaustedLabel : theme().colors.cardLabel;
   const uint16_t hintColor = exhausted ? theme().colors.exhaustedHint : theme().colors.cardHint;
-  drawText(label, 45, y + 39, labelColor, theme().type.strong32);
-  drawRight(valid ? String(remainingPercent) + "%" : "--", 440, y + 39,
+  const int16_t labelX = theme().metrics.cardX + 25;
+  drawText(label, labelX, y + 39, labelColor, theme().type.strong32);
+  drawRight(valid ? String(remainingPercent) + "%" : "--", theme().metrics.cardX + theme().metrics.cardWidth - 20, y + 39,
             theme().colors.primaryText, theme().type.strong32);
 
   const String reset = valid
                            ? "Resets in " + formatDuration(
                                  remainingSeconds(*packet, window, receivedAtMs))
                            : "Waiting for data";
-  const int16_t resetX = 45 + textWidth(label, theme().type.strong32) + 8;
+  const int16_t resetX = labelX + textWidth(label, theme().type.strong32) + 8;
   drawText(reset, resetX, y + 40, hintColor, theme().type.strong20);
 
-  const int16_t trackY = y + (exhausted ? 53 : 55);
+  const int16_t trackY = y + skin::layout(skin_format::ProgressY) - (exhausted ? 2 : 0);
   const float trackRadius = exhausted ? 6.0f : 8.0f;
   fillAARoundedRect(theme().metrics.progressX, trackY,
                     theme().metrics.progressWidth,
@@ -646,7 +739,7 @@ void drawCard(int16_t y, const char* fallbackLabel,
                     exhausted ? theme().colors.exhaustedTrack
                               : theme().colors.track);
   if (valid && remainingPercent > 0 && !exhausted) {
-    const int16_t progressWidth = max<int16_t>(20, remainingPercent * 4);
+    const int16_t progressWidth = max<int16_t>(theme().metrics.progressHeight, remainingPercent * theme().metrics.progressWidth / 100);
     drawNineSliceGlow(theme().assets.progressGlow,
                       theme().metrics.progressX, trackY,
                       progressWidth, theme().metrics.progressHeight,
@@ -657,143 +750,223 @@ void drawCard(int16_t y, const char* fallbackLabel,
   }
 }
 
-bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
-  String label;
-  uint16_t color;
-  uint16_t glowColor = 0;
-  bool showDot = false;
-  bool animatePulse = false;
-  bool animateThinkingDots = false;
-  bool centerTextPrecisely = false;
-  int16_t width = 180;
-  if (!packet ||
-      (packet &&
-       packet->test_state == codex_meter::kTestWaitingForSync)) {
-    label = "WAITING FOR SYNC";
-    color = theme().colors.warning;
-    width = 260;
-  } else if (packet->needs_approval ||
-             strcmp(packet->status, "need approval") == 0 ||
-             strcmp(packet->status, "needs approval") == 0) {
-    label = "NEED APPROVAL";
-    color = theme().colors.limitStatus;
-    glowColor = theme().colors.limitGlow;
-    animatePulse = true;
-    centerTextPrecisely = true;
-    width = 230;
-  } else if (!fresh) {
-    label = "DATA STALE";
-    color = theme().colors.warning;
-    width = 180;
-  } else if (strcmp(packet->status, "thinking") == 0) {
-    label = "THINKING...";
-    color = theme().colors.status;
-    showDot = true;
-    animatePulse = true;
-    animateThinkingDots = true;
-    width = 190;
-  } else if (packet->status[0] != '\0' && strcmp(packet->status, "idle") != 0) {
-    label = packet->status;
-    label.toUpperCase();
-    color = theme().colors.status;
-    width = min<int16_t>(
-        400, textWidth(label, theme().type.strong24) + 48);
-  } else {
-    return false;
-  }
-
-  const int16_t x = theme().metrics.pageMargin;
-  if (glowColor == 0) glowColor = color;
-  float pulse = 1.0f;
-  float normalizedPulse = 1.0f;
-  float animationPhase = 0.0f;
-  if (animatePulse) {
-    const uint32_t kCycleMs = theme().motion.thinkingCycleMs;
-    const uint32_t cycleMs = millis() % kCycleMs;
-    animationPhase = static_cast<float>(cycleMs) / kCycleMs;
-    constexpr float kTau = 6.28318530718f;
-    normalizedPulse = 0.5f - 0.5f * cosf(kTau * animationPhase);
-    normalizedPulse = normalizedPulse * normalizedPulse *
-                      (3.0f - 2.0f * normalizedPulse);
-    pulse = theme().motion.thinkingMinOpacity +
-            (theme().motion.thinkingMaxOpacity -
-             theme().motion.thinkingMinOpacity) * normalizedPulse;
-  }
-
-  const uint8_t cardOpacity =
-      static_cast<uint8_t>(pulse * 15.0f + 0.5f);
-  const uint16_t cardColor =
-      blend565(theme().colors.background, color, cardOpacity);
-  const uint16_t foreground =
-      blend565(theme().colors.background, theme().colors.primaryText,
-               cardOpacity);
-  const uint8_t glowAlpha =
-      animatePulse
-          ? static_cast<uint8_t>(
-                theme().motion.thinkingGlowMinAlpha +
-                (theme().motion.thinkingGlowMaxAlpha -
-                 theme().motion.thinkingGlowMinAlpha) *
-                    powf(normalizedPulse, 1.4f) +
-                0.5f)
-          : 255;
-  drawNineSliceGlow(theme().assets.statusGlow, x,
-                    theme().metrics.statusY, width,
-                    theme().metrics.statusHeight, glowColor, glowAlpha);
-  fillAARoundedRect(x, theme().metrics.statusY, width,
-                    theme().metrics.statusHeight,
-                    theme().metrics.statusRadius, cardColor);
-  if (showDot) {
-    fillAARoundedRect(x + 20, 40, 12, 12, 6.0f, foreground);
-  }
-  const int16_t textX =
-      x + (showDot
-               ? 40
-               : (width - textWidth(label, theme().type.strong24)) / 2);
-  if (animateThinkingDots) {
-    const String word = "THINKING";
-    drawText(word, textX, 55, foreground, theme().type.strong24);
-    const int16_t dotWidth = textWidth(".", theme().type.strong24);
-    const int16_t dotsX =
-        textX + textWidth(word, theme().type.strong24);
-    constexpr float kTau = 6.28318530718f;
-    for (uint8_t dot = 0; dot < 3; ++dot) {
-      const float wave =
-          0.5f + 0.5f *
-                     sinf(kTau *
-                          (animationPhase * 2.0f - dot / 3.0f));
-      const float dotOpacity =
-          constrain(pulse * (0.45f + 0.55f * wave), 0.30f, 1.0f);
-      const uint16_t dotColor = blend565(
-          theme().colors.background, theme().colors.primaryText,
-          static_cast<uint8_t>(dotOpacity * 15.0f + 0.5f));
-      drawText(".", dotsX + dot * dotWidth, 55, dotColor,
-               theme().type.strong24);
+status_motion::State resolveStatus(const codex_meter::CodexPacket* packet,
+                                    bool fresh) {
+  using status_motion::State;
+  if (!packet) return State::Waiting;
+  // Test selection is authoritative. A live approval bit left in a test
+  // snapshot must not make the full and partial render paths disagree.
+  if (packet->test_state != codex_meter::kTestNone) {
+    switch (packet->test_state) {
+      case codex_meter::kTestThinking: return State::Thinking;
+      case codex_meter::kTestNeedApproval: return State::Approval;
+      case codex_meter::kTestDataStale: return State::Stale;
+      case codex_meter::kTestWaitingForSync: return State::Waiting;
+      default: return State::Idle;
     }
-  } else if (centerTextPrecisely) {
-    drawTextCenteredInRect(label, x, theme().metrics.statusY, width,
-                           theme().metrics.statusHeight, foreground,
-                           theme().type.strong24);
-  } else {
-    drawText(label, textX, 55, foreground, theme().type.strong24);
   }
-  return true;
+  return status_motion::resolve(
+      true, false,
+      packet->needs_approval || strcmp(packet->status, "need approval") == 0 ||
+          strcmp(packet->status, "needs approval") == 0,
+      fresh, strcmp(packet->status, "thinking") == 0,
+      packet->status[0] != '\0' && strcmp(packet->status, "idle") != 0);
 }
 
-bool statusWouldBeVisible(const codex_meter::CodexPacket* packet, bool fresh) {
-  if (!packet || !fresh) return true;
-  if (packet->needs_approval) return true;
-  if (packet->test_state == codex_meter::kTestThinking ||
-      packet->test_state == codex_meter::kTestNeedApproval ||
-      packet->test_state == codex_meter::kTestDataStale ||
-      packet->test_state == codex_meter::kTestWaitingForSync) return true;
-  return packet->status[0] != '\0' && strcmp(packet->status, "idle") != 0;
+bool statusHasBackplate(status_motion::State state) {
+  if (skin::imported() && state != status_motion::State::Other && state != status_motion::State::Idle) {
+    const int index = state == status_motion::State::Thinking ? 0 : state == status_motion::State::Approval ? 1 : state == status_motion::State::Stale ? 2 : 3;
+    return skin::active()->animations[index].plate != 0;
+  }
+  return state == status_motion::State::Thinking ||
+         state == status_motion::State::Approval ||
+         state == status_motion::State::Other;
+}
+
+status_label::Look statusLight(status_motion::State state, uint32_t elapsed) {
+  if (skin::imported() && state != status_motion::State::Other && state != status_motion::State::Idle) {
+    if (!statusHasBackplate(state)) return {0,0};
+    const auto mode = state == status_motion::State::Thinking ? status_pixel::Mode::Thinking : state == status_motion::State::Approval ? status_pixel::Mode::Approval : state == status_motion::State::Stale ? status_pixel::Mode::Stale : status_pixel::Mode::Waiting;
+    return skin::light(mode, elapsed);
+  }
+  if (state == status_motion::State::Thinking || state == status_motion::State::Approval)
+    return status_label::sample(state == status_motion::State::Approval, elapsed);
+  return state == status_motion::State::Other ? status_label::Look{20,18}
+                                             : status_label::Look{0,0};
+}
+
+status_tile::Backdrop statusBackdrop(status_motion::State state,
+                                    const status_pixel::Frame& icon,
+                                    status_label::Look light) {
+  status_tile::Backdrop result;
+  result.background = theme().colors.background;
+  result.tint = state == status_motion::State::Other ? theme().colors.status
+      : uint16_t(((icon.r & 0xF8) << 8) | ((icon.g & 0xFC) << 3) | (icon.b >> 3));
+  if (!statusHasBackplate(state)) result.tint = 0;
+  result.card = blend565_8(result.background, result.tint, light.card);
+  result.edge = light.glow;
+  return result;
+}
+
+struct PillBackend {
+  int width(const char* s) { return textWidth(s, theme().type.strong24); }
+  uint16_t blend(uint16_t bg, uint16_t ink, uint8_t alpha) { return blend565(bg, ink, alpha); }
+  void glow(int x, int y, int w, int h, uint16_t color, uint8_t alpha) {
+    drawNineSliceGlow(theme().assets.statusGlow, x,y,w,h,color,alpha);
+  }
+  void rect(int x, int y, int w, int h, float radius, uint16_t color) {
+    fillAARoundedRect(x,y,w,h,radius,color);
+  }
+  void text(const char* s, int x, int baseline, uint16_t color) {
+    drawText(s,x,baseline,color,theme().type.strong24);
+  }
+  void center(const char* s, int x, int y, int w, int h, uint16_t color) {
+    drawTextCenteredInRect(s,x,y,w,h,color,theme().type.strong24);
+  }
+};
+
+bool drawStatus(const codex_meter::CodexPacket* packet, bool fresh) {
+  using status_motion::State;
+  statusBackground.invalidate();
+  const State state = resolveStatus(packet, fresh);
+  const uint32_t now = millis();
+  String label;
+  status_pixel::Mode iconMode = status_pixel::Mode::Thinking;
+  const AA4Font* font = theme().type.strong32;
+  switch (state) {
+    case State::Approval:
+      label = "NEED APPROVAL";
+      iconMode = status_pixel::Mode::Approval;
+      break;
+    case State::Stale:
+      label = "DATA STALE";
+      iconMode = status_pixel::Mode::Stale;
+      break;
+    case State::Waiting:
+      label = "WAITING FOR SYNC";
+      iconMode = status_pixel::Mode::Waiting;
+      font = &SofiaBold28;
+      break;
+    case State::Thinking: label = "THINKING"; break;
+    case State::Other:
+      label = packet->status;
+      label.toUpperCase();
+      font = theme().type.body28;
+      break;
+    case State::Idle:
+      statusTransition.update(state, 0, now);
+      currentStatusLabel = "";
+      statusTransitionNeedsFrame = false;
+      portENTER_CRITICAL(&statusStatsMux);
+      statusStats = {};
+      statusStatsState = static_cast<uint8_t>(State::Idle);
+      statusTotalUs = 0;
+      statusFirstFrameMs = statusLastFrameMs = now;
+      portEXIT_CRITICAL(&statusStatsMux);
+      return false;
+  }
+
+  if (skin::imported() && skin::active()->schema == 2 && state != State::Other) {
+    const unsigned index = static_cast<unsigned>(iconMode);
+    const auto& p = skin_format::pills(skin::active())[index];
+    if (statusTransition.update(state, p.width, now, label != currentStatusLabel)) {
+      statusLoopStartedMs = now;
+      currentStatusLabel = label;
+    }
+    // The classic style has no pixel entrance or tile cache; each tick rebuilds
+    // its bounded header so pulsing text/glow never accumulates old pixels.
+    statusTransitionNeedsFrame = false;
+    PillBackend backend;
+    skin_pill::draw(skin::active(), index, now-statusLoopStartedMs, backend);
+    return true;
+  }
+  const bool showIcon = state != State::Other;
+  const auto* skinAnimation = showIcon ? skin::animation(iconMode) : nullptr;
+  if (skinAnimation) font = skinAnimation->font == 28 ? &SofiaBold28 : theme().type.strong32;
+  // The chosen preview separates the glyph from the R8 text-only plate.
+  // Bare sync states keep the glyph position but bring the words closer.
+  constexpr int16_t kIconBodyWidth = 36;
+  const int16_t kPadding = skin::layout(skin_format::PlatePadding);
+  const bool hasPlate = statusHasBackplate(state);
+  const int16_t x = theme().metrics.pageMargin;
+  const int16_t y = theme().metrics.statusY;
+  const int16_t height = theme().metrics.statusHeight;
+  const int16_t groupX = skin::layout(skin_format::StatusBodyX);
+  const int16_t cardX = showIcon ? groupX + kIconBodyWidth + skin::layout(skin_format::PlateGap) : x;
+  const int16_t textX = hasPlate ? cardX + kPadding : groupX + kIconBodyWidth + skin::layout(skin_format::BareGap);
+  const int16_t maxTextWidth = kStatusRegionWidth - kStatusRightPadding - textX -
+                               (hasPlate ? kPadding : 0);
+  if (textWidth(label, font) > maxTextWidth) {
+    while (label.length() > 0 &&
+           textWidth(label + "...", font) > maxTextWidth) {
+      label.remove(label.length() - 1);
+    }
+    label += "...";
+  }
+  const int16_t labelWidth = textWidth(label, font);
+  const int16_t cardWidth = hasPlate ? labelWidth + 2 * kPadding : 0;
+  const int16_t targetWidth = textX + labelWidth + (hasPlate ? kPadding : 0) - x;
+  if (statusTransition.update(state, targetWidth, now,
+                              label != currentStatusLabel)) {
+    statusLoopStartedMs = now;
+    currentStatusLabel = label;
+  }
+  const float progress = statusTransition.progress(now);
+  // Schedule the terminal frame too, even if the previous sample was just
+  // before 240 ms and the new state does not have a continuous glyph loop.
+  statusTransitionNeedsFrame = statusTransition.active(now);
+  const uint32_t elapsed = now - statusLoopStartedMs;
+  const auto icon = skin::sample(iconMode, elapsed);
+  const auto light = statusLight(state, elapsed);
+  const auto backdrop = statusBackdrop(state, icon, light);
+  const uint16_t cardColor = backdrop.card;
+  // Fixed layout during the short entrance avoids rebuilding the geometry
+  // mask every animation tick. Opacity/vertical easing are retained below.
+  if (hasPlate) {
+    if (statusBackplate.configure(cardX, y, cardWidth, height, theme().metrics.statusRadius)) {
+      statusBackplate.draw(canvas->getFramebuffer(), LCD_WIDTH,
+                          backdrop.background, backdrop.tint, light);
+    }
+  }
+
+  // Warnings bypass this entrance in Transition::update. Normal work states
+  // settle over 240 ms; repeated heartbeats keep their existing phase.
+  const float opacity = 0.45f + 0.55f * progress;
+  const int16_t offsetY = static_cast<int16_t>((1.0f - progress) * 4.0f + 0.5f);
+  if (showIcon) {
+    const int16_t iconX = groupX + (kIconBodyWidth - status_pixel::kSize) / 2;
+    const int16_t iconY = y + (height - status_pixel::kSize) / 2 + offsetY;
+    if (!statusTransitionNeedsFrame &&
+        statusBackground.capture(canvas->getFramebuffer(), LCD_WIDTH,
+                                 LCD_WIDTH, LCD_HEIGHT, iconX, iconY)) {
+      cachedStatusBackdrop = backdrop;
+      cachedStatusLight = light;
+      cachedStatusRight = hasPlate ? cardX + cardWidth : textX + labelWidth;
+      cachedStatusState = state;
+      cachedIconMode = iconMode;
+      cachedStatusTheme = &theme();
+    }
+    status_pixel::draw(canvas->getFramebuffer() + iconY * LCD_WIDTH + iconX,
+                       LCD_WIDTH, icon, opacity);
+  }
+  const uint32_t ink = skinAnimation ? skinAnimation->textColor : 0;
+  const uint16_t textColor = skinAnimation ? uint16_t(((ink >> 8) & 0xF800) | ((ink >> 5) & 0x07E0) | ((ink >> 3) & 31)) : state == State::Stale
+      ? uint16_t(((status_pixel::kGoldR & 0xF8) << 8) |
+                 ((status_pixel::kGoldG & 0xFC) << 3) | (status_pixel::kGoldB >> 3))
+      : theme().colors.primaryText;
+  const uint16_t foreground = blend565_8(cardColor, textColor,
+      static_cast<uint8_t>(opacity * 255.0f + 0.5f));
+  drawTextCenteredInRect(label, textX, y + offsetY,
+                         labelWidth, height, foreground, font,
+                         statusBackground.valid());
+  return true;
 }
 
 void drawTokenTotal(uint64_t value) {
   const String total = commaNumber(value);
   const AA4Font* totalFont = theme().type.total64;
   if (textWidth(total, totalFont) > 421) totalFont = theme().type.total48;
-  drawText(total, 30, 181, theme().colors.primaryText, totalFont);
+  drawText(total, skin::layout(skin_format::TotalX), skin::layout(skin_format::TotalBaseline), theme().colors.primaryText, totalFont);
 }
 
 uint64_t sampleTotalAnimation(uint32_t now) {
@@ -844,6 +1017,7 @@ String resetCountValue(const codex_meter::CodexPacket* packet) {
 void renderFrame(const codex_meter::CodexPacket* packet, bool fresh,
                  int batteryPercent, bool batteryCharging,
                  uint32_t receivedAtMs, uint64_t displayedTotal) {
+  statusBackground.invalidate();
   gfx->fillScreen(theme().colors.background);
   const bool statusVisible =
       updateOverlayVisible() ? false : drawStatus(packet, fresh);
@@ -866,11 +1040,11 @@ void renderFrame(const codex_meter::CodexPacket* packet, bool fresh,
       packet->flags & codex_meter::kLifetimeTokenTotal
           ? "TOTAL TOKENS"
           : "TODAY TOKENS";
-  drawText(tokenLabel, 30, kTotalTokensBaseline, theme().colors.muted,
+  drawText(tokenLabel, skin::layout(skin_format::LabelX), skin::layout(skin_format::LabelBaseline), theme().colors.muted,
            theme().type.body24);
   if (!singleQuota) {
     drawRight("Resets:  " + resetCountValue(packet),
-              450, 115, theme().colors.muted, theme().type.body24);
+              skin::layout(skin_format::ResetRight), skin::layout(skin_format::LabelBaseline), theme().colors.muted, theme().type.body24);
   }
 
   drawTokenTotal(displayedTotal);
@@ -880,18 +1054,18 @@ void renderFrame(const codex_meter::CodexPacket* packet, bool fresh,
   if (singleQuota) {
     const codex_meter::UsageWindow& onlyWindow =
         primaryValid ? packet->primary : packet->secondary;
-    drawCard(261, primaryValid ? "5H" : "WEEK", packet, onlyWindow,
+    drawCard(skin::layout(skin_format::SingleY), primaryValid ? "5H" : "WEEK", packet, onlyWindow,
              true, receivedAtMs);
-    drawText("Resets:  " + resetCountValue(packet), 30, 407,
+    drawText("Resets:  " + resetCountValue(packet), skin::layout(skin_format::LabelX), skin::layout(skin_format::SingleResetY),
              theme().colors.muted, theme().type.body32);
     drawText("The full reset will expire on " +
              formatResetDate(onlyWindow.resets_at),
-             30, 447, theme().colors.muted, theme().type.body28);
+             skin::layout(skin_format::LabelX), skin::layout(skin_format::SingleFooterY), theme().colors.muted, theme().type.body28);
   } else {
-    drawCard(251, "5H", packet,
+    drawCard(skin::layout(skin_format::PrimaryY), "5H", packet,
              primaryValid ? packet->primary : empty,
              primaryValid, receivedAtMs);
-    drawCard(361, "WEEK", packet,
+    drawCard(skin::layout(skin_format::SecondaryY), "WEEK", packet,
              secondaryValid ? packet->secondary : empty,
              secondaryValid, receivedAtMs);
   }
@@ -1089,6 +1263,7 @@ bool begin() {
 }
 
 void setPage(Page value) {
+  if (currentPage != value) statusBackground.invalidate();
   currentPage = value;
 }
 
@@ -1109,6 +1284,7 @@ void setDeviceName(const String& deviceName) {
 }
 
 void setUpdateState(const String& status, uint8_t progressPercent) {
+  statusBackground.invalidate();
   currentUpdateStatus = status;
   currentUpdateStatus.trim();
   currentUpdateStatus.toUpperCase();
@@ -1133,6 +1309,7 @@ void setBrightness(uint8_t brightnessPercent) {
 void setRotation(uint8_t value) {
   value &= 0x03;
   if (value == currentRotation) return;
+  statusBackground.invalidate();
   currentRotation = value;
   // Compose each page in a stable rotation-0 Canvas. flushFrame() rotates the
   // completed bitmap, keeping layout and antialiased pixel writes consistent.
@@ -1146,6 +1323,7 @@ uint8_t rotation() {
 
 void sleepDisplay() {
   if (!panel || isDisplaySleeping) return;
+  statusBackground.invalidate();
   panel->setBrightness(0);
   panel->displayOff();
   isDisplaySleeping = true;
@@ -1153,6 +1331,7 @@ void sleepDisplay() {
 
 void wakeDisplay() {
   if (!panel || !isDisplaySleeping) return;
+  statusBackground.invalidate();
   panel->displayOn();
   panel->setBrightness(map(currentBrightness, 0, 100, 0, 255));
   isDisplaySleeping = false;
@@ -1275,10 +1454,19 @@ bool updateAnimationActive() {
   return currentPage == Page::Update && updateDotsVisible();
 }
 
+bool statusAnimationActive(const codex_meter::CodexPacket* packet, bool fresh) {
+  if (currentPage != Page::Dashboard || isDisplaySleeping ||
+      updateOverlayVisible()) return false;
+  const auto state = resolveStatus(packet, fresh);
+  return !statusTransition.initialized() ||
+      state != statusTransition.state() || status_motion::loops(state) ||
+      statusTransitionNeedsFrame || statusTransition.active(millis());
+}
+
 void renderTokenAnimationFrame() {
   if (!tokenAnimationActive() || !gfx) return;
   constexpr int16_t kRegionX = 20;
-  constexpr int16_t kRegionY = kTodayTokensGlyphBottomExclusive + 1;
+  const int16_t kRegionY = skin::layout(skin_format::TotalBaseline) - 65;
   constexpr int16_t kRegionWidth = 440;
   constexpr int16_t kRegionHeight = 76;
   gfx->fillRect(kRegionX, kRegionY, kRegionWidth, kRegionHeight, theme().colors.background);
@@ -1300,32 +1488,58 @@ void renderUpdateAnimationFrame() {
 
 void renderStatusAnimationFrame(const codex_meter::CodexPacket* packet,
                                 bool fresh) {
-  if (currentPage != Page::Dashboard || !packet || !gfx) return;
-  codex_meter::CodexPacket statusPacket;
-  if (packet->test_state == codex_meter::kTestThinking ||
-      packet->test_state == codex_meter::kTestNeedApproval) {
-    statusPacket = *packet;
-    statusPacket.flags &= ~codex_meter::kRateLimitReached;
-    strlcpy(statusPacket.status,
-            packet->test_state == codex_meter::kTestThinking
-                ? "thinking"
-                : "need approval",
-            sizeof(statusPacket.status));
-    packet = &statusPacket;
+  if (!gfx || !statusAnimationActive(packet, fresh)) return;
+
+  // Bare labels normally use the 64px tile. Breathing plates redraw the
+  // necessary header area when their palette changes, then recapture a clean
+  // tile so neither the background nor text AA accumulates between frames.
+  const auto state = resolveStatus(packet, fresh);
+  const StatusFrameTimer timer(state);
+  const uint32_t now = millis();
+  const bool settledSame = statusBackground.valid() && state == cachedStatusState &&
+      cachedStatusTheme == &theme() && !statusTransitionNeedsFrame &&
+      !statusTransition.active(now);
+  if (settledSame) {
+    const auto icon = skin::sample(cachedIconMode, now - statusLoopStartedMs);
+    const auto light = statusLight(state, now - statusLoopStartedMs);
+    if (cachedStatusLight.card == light.card && cachedStatusLight.glow == light.glow &&
+        cachedStatusBackdrop.samePixels(statusBackdrop(state, icon, light)) &&
+        statusBackground.restore(canvas->getFramebuffer(), LCD_WIDTH,
+                                 LCD_WIDTH, LCD_HEIGHT)) {
+      const auto& tile = statusBackground.rect;
+      status_pixel::draw(canvas->getFramebuffer() + tile.y * LCD_WIDTH + tile.x,
+                         LCD_WIDTH, icon);
+      // The halo overlaps up to 4px of the bare sync label. Redraw only
+      // that intersection, never accumulate AA on the untouched text.
+      drawText(currentStatusLabel, cachedStatusTextX, cachedStatusBaseline,
+                cachedStatusForeground, cachedStatusFont, &tile);
+      flushRegion(tile.x, tile.y, tile.width, tile.height);
+      return;
+    }
   }
-  const bool approvalPending = packet->needs_approval ||
-      strcmp(packet->status, "need approval") == 0 ||
-      strcmp(packet->status, "needs approval") == 0;
-  if (!fresh && !approvalPending) return;
-  if (!approvalPending && strcmp(packet->status, "thinking") != 0) return;
 
   constexpr int16_t kRegionX = 0;
   constexpr int16_t kRegionY = 0;
-  constexpr int16_t kRegionWidth = 280;
+  const int16_t kRegionWidth = settledSame
+      ? min<int16_t>(kStatusRegionWidth, cachedStatusRight + 30) : kStatusRegionWidth;
   constexpr int16_t kRegionHeight = kTodayTokensGlyphTop;
   gfx->fillRect(kRegionX, kRegionY, kRegionWidth, kRegionHeight, theme().colors.background);
-  drawStatus(packet, true);
+  if (!drawStatus(packet, fresh) && packet) drawBrand(packet);
   flushRegion(kRegionX, kRegionY, kRegionWidth, kRegionHeight);
+}
+
+StatusRenderStats statusRenderStats() {
+  portENTER_CRITICAL(&statusStatsMux);
+  const StatusRenderStats result = statusStats;
+  portEXIT_CRITICAL(&statusStatsMux);
+  return result;
+}
+
+void skinChanged() {
+  statusBackground.invalidate();
+  statusBackplate.invalidate();
+  statusTransition = status_motion::Transition{};
+  cachedStatusTheme = nullptr;
 }
 
 void renderBatteryAnimationFrame(const codex_meter::CodexPacket* packet,
