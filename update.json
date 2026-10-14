@@ -2,13 +2,13 @@
   "schema": 1,
   "channel": "stable",
   "repository": "VinsonKon/token-meter-releases",
-  "tag": "v1.1.4",
-  "generated_at": "2026-09-09T08:58:44.251974+00:00",
+  "tag": "v1.1.5",
+  "generated_at": "2026-10-14T02:32:33.171522+00:00",
   "client": {
-    "version": "1.1.4",
+    "version": "1.1.5",
     "asset": "CodexMeterSync.exe",
-    "size": 19227136,
-    "sha256": "93be7cc7a0df36baeaa81074c0bb101e34e654b5322e8f614561f3e274861842"
+    "size": 19241984,
+    "sha256": "08f15971e15e5b2a0fc31122dc3395f30f06c8f657aa753e5bb533098a37d4ce"
   },
   "firmware": {
     "version": "1.1.4",

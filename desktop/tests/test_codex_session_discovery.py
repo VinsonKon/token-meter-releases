@@ -586,7 +586,7 @@ class CodexSessionFilteringAndTokenTests(unittest.TestCase):
         self.assertEqual(3_000_000, message["t"][4])
         self.assertEqual([0, 0, 0, 0], message["t"][:4])
         self.assertFalse(message["lt"])
-        self.assertEqual(5.0, sync.estimate_cost_usd(snapshot))
+        self.assertEqual(4.0, sync.estimate_cost_usd(snapshot))
         self.assertEqual(
             {"gpt-5.6-sol", "future-model"},
             set(snapshot["cost_tokens_by_model"]),

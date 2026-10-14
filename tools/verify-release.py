@@ -26,18 +26,21 @@ def validate(folder):
     version = (ROOT / "VERSION").read_text().strip()
     assert version == release_config.APP_VERSION
     header = (ROOT / "firmware/include/firmware_version.h").read_text()
-    assert re.search(r'kFirmwareVersion\[\]\s*=\s*"' + re.escape(version) + r'"', header)
+    firmware_match = re.search(r'kFirmwareVersion\[\]\s*=\s*"(\d+\.\d+\.\d+)"', header)
+    assert firmware_match, "Firmware version is missing"
+    firmware_version = firmware_match[1]
+    assert tuple(map(int, firmware_version.split("."))) <= tuple(map(int, version.split(".")))
     files = {name: (folder / name).read_bytes() for name in ASSETS}
     manifest = json.loads(files["update.json"])
     assert manifest["schema"] == 1 and manifest["channel"] == "stable"
     assert manifest["tag"] == "v" + version and manifest["repository"] == release_config.RELEASE_REPOSITORY
     for section in ("client", "firmware"):
         item = manifest[section]
-        assert item["version"] == version
+        assert item["version"] == (version if section == "client" else firmware_version)
         assert len(files[item["asset"]]) == item["size"] and digest(files[item["asset"]]) == item["sha256"]
-    assert manifest["firmware"]["min_client"] == version
+    assert manifest["firmware"]["min_client"] == firmware_version
     assert manifest["firmware"]["board"] == "waveshare-amoled-2.16"
-    assert (version + "\0").encode() in files["codex-token-monitor.ota.bin"]
+    assert (firmware_version + "\0").encode() in files["codex-token-monitor.ota.bin"]
     ota = files["codex-token-monitor.ota.bin"]
     assert files["codex-token-monitor.factory.bin"][0x10000:0x10000+len(ota)] == ota
     for name in ASSETS[:4]:

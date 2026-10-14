@@ -538,7 +538,7 @@ class DevicePacketSelectionTests(unittest.TestCase):
             "total_tokens": 1_000_000,
         }
 
-        self.assertEqual(5.0, sync.estimate_cost_usd(snapshot))
+        self.assertEqual(4.0, sync.estimate_cost_usd(snapshot))
 
     def test_empty_local_daily_cost_is_explicit_zero(self) -> None:
         snapshot = self.snapshot()
@@ -586,7 +586,7 @@ class DevicePacketSelectionTests(unittest.TestCase):
             },
         }
 
-        self.assertEqual(7.5, sync.estimate_cost_usd(snapshot))
+        self.assertEqual(6.0, sync.estimate_cost_usd(snapshot))
 
     def test_unknown_only_usage_is_unavailable_not_misleading_zero(self) -> None:
         snapshot = self.snapshot()

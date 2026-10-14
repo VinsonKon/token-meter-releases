@@ -1,5 +1,19 @@
 # Codex Token Monitor for Waveshare AMOLED 2.16
 
+## Version 1.1.5 — 官方在线价格表与新模型自动计价
+
+客户端更新为 **1.1.5**。本次为客户端功能更新，发布包沿用已验证的 **1.1.4**
+固件，更新清单分别标注真实版本；现有 v1.1.4 设备无需为在线计价功能刷写固件。
+
+- 更新 GPT-6.1 Sol、GPT-6 Sol、GPT-6 Luna 与 GPT-5.6 系列基础价格。
+- 直接读取 OpenAI 官方公开价格表，启动时后台查询，之后每 24 小时刷新。
+- 新模型从在线数据自动识别；同格式的新模型和价格调整不再依赖客户端升级。
+- 托盘新增 `价格表` 菜单，可查看来源、更新时间和立即刷新。
+- 查询失败沿用缓存；无缓存时采用内置价格；异常数据不会覆盖有效缓存或干扰 BLE 同步。
+- 精确匹配型号，只有日期快照继承基础价格，避免未知 pro/mini 等变体误用基础模型价格。
+- 当天无数据仍显示 0；RMB 保持 Standard 短上下文 API 等价估算，不是订阅账单。
+- 156 项客户端测试通过；实际联网读取 47 个可计价文本模型，打包客户端解析检查通过。
+
 ## Version 1.1.4 — 同步恢复、Astra 计价与更高动画帧率
 
 客户端与固件统一为 **1.1.4**。先更新客户端，再通过 `Updates` 更新设备固件。
@@ -151,7 +165,8 @@ ACK 使用毫秒级进程内单调序列号，连续点击 `Sync now` 也不会�
 `%APPDATA%\CodexMeter\.source-selection.json`，也可以用 `--source codex`、
 `--source claude-code` 或环境变量 `CODEX_METER_SOURCE` 设置。旧版按模型保存的设置
 会自动迁移为 `Codex`。品牌注册与托盘选项集中在 `desktop/source_registry.py`，
-具体型号及价格集中在 `desktop/model_registry.py`。
+具体型号的离线价格在 `desktop/model_registry.py`；`desktop/pricing_catalog.py`
+会直接读取官方公开价格表，新型号无需逐个加入客户端。
 
 Claude Code 的本地日志目前提供当天 token 与最近型号，但不提供 Codex 风格的
 5H/WEEK 配额及 banked resets，因此切换到 Claude Code 时这两张卡显示 `--`。
@@ -313,14 +328,43 @@ USD = ((input - cached) × 10.00 + cached × 1.00 + output × 50.00) / 1,000,000
 CNY = USD × USD/CNY
 ```
 
-`output_tokens` 已包含 reasoning token，因此不会把 `reasoning_output_tokens` 再计费一次。GPT-6 Astra 单价于 2026-09-09 核对 [OpenAI 官方 API 价格表](https://developers.openai.com/api/docs/pricing)，单位为美元 / 百万 Token：
+`output_tokens` 已包含 reasoning token，因此不会把 `reasoning_output_tokens` 再计费一次。2026-10-13 核对 [OpenAI 官方 API 价格表](https://developers.openai.com/api/docs/pricing)，当前基础估算价格如下，单位为美元 / 百万 Token：
+
+| 模型 | 输入 | 缓存输入 | 输出 |
+| --- | ---: | ---: | ---: |
+| GPT-6 Astra | 10.00 | 1.00 | 50.00 |
+| GPT-6.1 Sol | 2.00 | 0.10 | 10.00 |
+| GPT-6 Sol | 2.00 | 0.20 | 10.00 |
+| GPT-6 Luna | 0.10 | 0.01 | 0.50 |
+| GPT-5.6 Sol | 4.00 | 0.40 | 20.00 |
+| GPT-5.6 Terra | 2.00 | 0.20 | 12.00 |
+| GPT-5.6 Luna | 0.20 | 0.02 | 1.20 |
+
+客户端启动时立即载入 `.model-pricing.json` 本地缓存，并在后台读取官方
+`https://developers.openai.com/api/docs/pricing.md`，无需 API Key，也不会发送会话或账号数据。
+每 24 小时重新查询一次；新模型与价格调整从价格表自动加入，不依赖客户端版本更新。
+托盘的 `价格表` 菜单显示价格来源和更新时间，并提供 `立即更新价格表`。
+查询失败保留上一次有效价格，30 分钟后允许重试；没有缓存时使用上述内置价格。
+解析失败或返回异常数据不会覆盖有效缓存，也不会影响账号额度和 BLE 同步。
+`--no-live-prices` 禁止在线查询，只使用缓存和内置价格。
+
+型号优先精确匹配，只有日期后缀快照继承基础型号价格；未知的 `-pro`、`-mini`
+等变体不会误用基础型号价格。官方 `/v1/models` 只返回型号元数据，并不返回价格，
+因此自动价格来自官方公开文档。官方页面结构若发生不兼容变化，需更新解析器。
+
+价格缓存分别保存 Standard、Batch、Flex、Fast、Ultrafast 及短/长上下文、缓存写入
+价格；这些字段不会在解析时混为一套单价。例如 Astra：
 
 | Standard 上下文档位 | 输入 | 缓存输入 | 缓存写入 | 输出 |
 | --- | ---: | ---: | ---: | ---: |
 | 短上下文 | 10.00 | 1.00 | 12.50 | 50.00 |
 | 长上下文 | 20.00 | 2.00 | 25.00 | 75.00 |
 
-当前本地日志聚合没有按上下文档位、缓存写入或服务层级拆分费用，因此 Astra 的 RMB 沿用本项目的基础 API 等价估算方式：按 Standard 短上下文的输入、缓存输入和输出三项单价计算，不额外推算缓存写入费、长上下文或 Fast 模式差价。它不是精确 API 账单，也不是 Pro 订阅实际扣款。此前的模型价格配置在本次 Astra 收录中保持不变。
+官方短上下文为每次请求输入 ≤272K Token，长上下文为 >272K Token；不能用一天累计
+Token 来选择长上下文价格。当前本地日志聚合没有按每次请求的上下文档位、缓存写入
+或服务层级拆分费用，因此 RMB 按 Standard 短上下文的输入、缓存输入和输出三项
+单价估算，不额外推算缓存写入费、长上下文、地区附加费或 Fast 差价。
+它不是精确 API 账单，也不是 Pro 订阅实际扣款。
 
 汇率规则参考 token-monitor v0.24.0：`--usd-cny` 手动值 > 24 小时在线/本地缓存 > 内置离线兜底 `6.8`。在线汇率失败不会影响 BLE 同步。`--no-live-fx` 禁用在线查询，`--cost-cny` 仍可直接覆盖最终显示金额。屏幕以 `RMB` 标识金额；每个已知模型按自己的价格计入总额，未知模型只跳过该项。当天没有 Token 数据时 Token 和费用显示 `0`；有用量但模型无法计价时费用显示 `--`，不会沿用上一来源或前一天的费用。
 

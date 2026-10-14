@@ -67,6 +67,7 @@ from PIL import Image
 import pystray
 
 import source_registry
+import pricing_catalog
 import sync as meter_sync
 import release_config
 import update_manager
@@ -357,6 +358,7 @@ class TrayService:
             pystray.MenuItem("Device", pystray.Menu(self._device_menu_items)),
             pystray.MenuItem("AI Tool", self._source_menu()),
             pystray.MenuItem("皮肤", pystray.Menu(self._skin_menu_items)),
+            pystray.MenuItem("价格表", pystray.Menu(self._pricing_menu_items)),
         ]
         if test_build:
             menu_items.append(pystray.MenuItem(
@@ -662,6 +664,26 @@ class TrayService:
         self._set_status(
             f"AI tool changed: {source_registry.selector_label(self.args.source)}"
         )
+
+    def _pricing_menu_items(self):
+        status = pricing_catalog.active.status()
+        labels = {"builtin": "内置价格", "cache": "本地缓存",
+                  "live": "官方在线", "stale-cache": "历史缓存"}
+        label = labels.get(status.source, status.source)
+        stamp = (datetime.fromtimestamp(status.fetched_at).strftime("%m-%d %H:%M")
+                 if status.fetched_at else "2026-10-13")
+        yield pystray.MenuItem(f"{label} · {stamp}", None, enabled=False)
+        yield pystray.MenuItem("每天自动更新 · API 等价估算", None, enabled=False)
+        if status.error:
+            yield pystray.MenuItem("在线更新暂不可用，沿用已有价格", None, enabled=False)
+        yield pystray.MenuItem("正在更新…" if status.refreshing else "立即更新价格表",
+                               self._refresh_prices, enabled=not status.refreshing)
+
+    def _refresh_prices(self, _icon, _item) -> None:
+        if pricing_catalog.active.refresh_in_background(force=True):
+            self._set_status("正在更新官方价格表…")
+        else:
+            self._set_status("价格表更新已在进行，或已禁用在线价格")
 
     def _update_menu_items(self):
         with self.update_lock:
@@ -1364,6 +1386,20 @@ class TrayService:
 
 
 def main(test_build: bool = False) -> int:
+    if "--validate-pricing" in sys.argv:
+        # Validate public pricing data without opening the tray, reading an
+        # account, connecting BLE or touching persistent user settings.
+        try:
+            index = sys.argv.index("--validate-pricing")
+            data = pricing_catalog.validate_catalogue(pricing_catalog.parse_openai_pricing(
+                Path(sys.argv[index + 1]).read_text(encoding="utf-8")))
+            print(json.dumps({"model_count": len(data["models"]),
+                              "long_context_above_tokens": data["long_context_above_tokens"],
+                              "models": data["models"]}, ensure_ascii=False))
+            return 0
+        except (IndexError, OSError, ValueError) as exc:
+            print(f"Invalid pricing data: {exc}")
+            return 2
     if "--validate-skin" in sys.argv:
         # Read-only packed-client smoke test / author utility. No tray, account,
         # autostart, instance-lock, BLE or persistent settings side effects.

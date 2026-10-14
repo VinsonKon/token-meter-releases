@@ -28,6 +28,8 @@ desktop/dist*/
 .device-address
 .device-name
 .exchange-rates.json
+.model-pricing.json
+.model-pricing-*.tmp
 .reset-credits.json
 .source-selection.json
 .model-selection.json

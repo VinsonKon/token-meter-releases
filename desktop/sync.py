@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 
 import codex_account
 import model_registry
+import pricing_catalog
 import source_registry
 import update_manager
 import skin_manager
@@ -349,6 +350,9 @@ def cost_cny_for_snapshot(
 ) -> tuple[float | None, str]:
     if manual_cost is not None:
         return max(0.0, manual_cost), "manual-cost"
+    # Price downloads are isolated from account freshness and BLE. Lookup is
+    # immediate; a successful refresh asks the worker to resend live costs.
+    pricing_catalog.active.refresh_in_background()
     cost_usd = estimate_cost_usd(snapshot)
     if cost_usd is None:
         return None, "unavailable"
@@ -2280,6 +2284,25 @@ async def run(
     test_mode_event = test_mode_event or threading.Event()
     test_restore_event = test_restore_event or threading.Event()
     device_change_event = device_change_event or threading.Event()
+
+    def pricing_updated(status: pricing_catalog.PricingStatus) -> None:
+        if status.source == "live":
+            _emit(f"Model prices updated from official data: {status.model_count} models",
+                  status_callback)
+            sync_now_event.set()
+        if status.error:
+            _emit(f"Model price refresh: {status.error}; keeping available rates",
+                  status_callback, error=True)
+
+    prices = pricing_catalog.configure(
+        data_dir / ".model-pricing.json",
+        allow_live=not getattr(args, "no_live_prices", False),
+        callback=pricing_updated,
+    )
+    if args.dry_run or args.once:
+        await asyncio.to_thread(prices.refresh)
+    else:
+        prices.refresh_in_background()
     usd_cny, fx_source = resolve_usd_cny(
         fx_cache, args.usd_cny, allow_live=not args.no_live_fx
     )
@@ -2457,6 +2480,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Do not fetch an exchange rate; use cache or the 6.8 fallback",
     )
     parser.add_argument("--address", help="Known BLE address; skips name-based selection")
+    parser.add_argument(
+        "--no-live-prices", action="store_true",
+        help="Use cached/built-in model prices without querying official documentation",
+    )
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--heartbeat", type=float, default=30.0)
     parser.add_argument("--debounce", type=float, default=0.75)

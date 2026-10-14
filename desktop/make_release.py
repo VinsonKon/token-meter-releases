@@ -42,11 +42,15 @@ def main() -> int:
     ).read_text(encoding="utf-8")
     match = re.search(r'kFirmwareVersion\[\]\s*=\s*"([^"]+)"', firmware_header)
     firmware_version = match.group(1) if match else ""
-    if firmware_version != version:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", firmware_version):
         raise SystemExit(
-            f"VERSION ({version}) and firmware version "
-            f"({firmware_version or 'missing'}) disagree"
+            f"Firmware version is invalid: {firmware_version or 'missing'}"
         )
+    # Client-only releases can carry the existing verified firmware. Its own
+    # version remains the protocol compatibility floor; never relabel bytes as
+    # a firmware update just because the desktop application changed.
+    if tuple(map(int, firmware_version.split("."))) > tuple(map(int, version.split("."))):
+        raise SystemExit("Client version is older than the firmware compatibility floor")
 
     names = (
         release_config.CLIENT_ASSET_NAME,
@@ -88,9 +92,9 @@ def main() -> int:
             "sha256": sha256(sources[release_config.CLIENT_ASSET_NAME]),
         },
         "firmware": {
-            "version": version,
+            "version": firmware_version,
             "board": "waveshare-amoled-2.16",
-            "min_client": version,
+            "min_client": firmware_version,
             "min_battery": 30,
             "asset": release_config.FIRMWARE_OTA_ASSET_NAME,
             "size": sources[
